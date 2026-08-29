@@ -17,11 +17,16 @@ from typing import Any, Dict, Literal, Optional
 # —— 词汇表（frozen，作为运行时校验依据）——
 NodeType = Literal["belief", "value", "trait", "essence"]
 Valence = Literal["positive", "negative", "neutral"]
-SourceType = Literal["v1_memory", "sage_fact", "inner_life_event"]
+# world_event 是 additive 扩展：Soul OS 的 world→elevation 直通 adapter 把
+# WorldEvent（news/weather/calendar）直接映射成 ElevationInput，不经 InnerLifeEvent。
+# 既有 3 值（v1_memory / sage_fact / inner_life_event）语义 0 变更。
+SourceType = Literal["v1_memory", "sage_fact", "inner_life_event", "world_event"]
 
 VALID_NODE_TYPES: frozenset = frozenset({"belief", "value", "trait", "essence"})
 VALID_VALENCES: frozenset = frozenset({"positive", "negative", "neutral"})
-VALID_SOURCE_TYPES: frozenset = frozenset({"v1_memory", "sage_fact", "inner_life_event"})
+VALID_SOURCE_TYPES: frozenset = frozenset(
+    {"v1_memory", "sage_fact", "inner_life_event", "world_event"}
+)
 
 
 def new_id() -> str:

@@ -109,7 +109,12 @@ def test_node_does_not_store_evidence_body():
 
 
 def test_edge_source_type_vocabulary():
-    assert sorted(VALID_SOURCE_TYPES) == ["inner_life_event", "sage_fact", "v1_memory"]
+    assert sorted(VALID_SOURCE_TYPES) == [
+        "inner_life_event",
+        "sage_fact",
+        "v1_memory",
+        "world_event",
+    ]
     with pytest.raises(ValueError):
         _edge(source_type="s3_file")
 
