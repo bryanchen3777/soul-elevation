@@ -5,7 +5,10 @@ from pathlib import Path
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "soul_elevation"
 
 # 本阶段源码实际使用的标准库模块白名单。
-STDLIB_USED = {"__future__", "abc", "dataclasses", "typing", "uuid"}
+STDLIB_USED = {
+    "__future__", "abc", "collections", "dataclasses", "datetime", "json", "logging",
+    "pathlib", "typing", "uuid",
+}
 
 
 def _py_files():
