@@ -48,6 +48,14 @@ DEFAULT_DECAY_RATE = 0.5
 DEFAULT_CONFIDENCE_BOOST = 0.2
 DEFAULT_STABILITY_BOOST = 0.3
 
+# —— essence 保守边界（MEMORY-LIFECYCLE §3.2）——
+# essence 修订高门槛：仅当 valence 反转 + ≥2 条新独立证据 + confidence delta 超阈值
+# 才允许 reconsolidation 改写；否则只 reinforce（stability/confidence 微升）。
+ESSENCE_REVISE_MIN_EVIDENCE = 2
+ESSENCE_REVISE_CONFIDENCE_DELTA = 0.3
+DEFAULT_REINFORCE_CONFIDENCE_BOOST = 0.1
+DEFAULT_REINFORCE_STABILITY_BOOST = 0.1
+
 
 def _utcnow_iso() -> str:
     """当前 UTC 时刻的 ISO 8601 字符串（用于 created_ts / valid_from_ts）。"""
@@ -68,6 +76,13 @@ def _most_common_node_type(nodes: Sequence[ElevationNode]) -> NodeType:
     """多数派 node_type（并列取出现顺序里先到的那个）。"""
     counts = Counter(n.node_type for n in nodes)
     return counts.most_common(1)[0][0]
+
+
+def _valence_reversed(old: Valence, new: Valence) -> bool:
+    """valence 反转：极性翻转（positive ↔ negative）；neutral 不算反转。"""
+    return (old == "positive" and new == "negative") or (
+        old == "negative" and new == "positive"
+    )
 
 
 class ElevationEngine(ABC):
@@ -248,6 +263,44 @@ class InternalizingEngine(ElevationEngine):
 
     # —— 第三阶段：reconsolidation 式信念修订 ——
 
+    def _reinforce(self, node: ElevationNode) -> ElevationNode:
+        """只 reinforce（不改写）：原地提升 stability/confidence，不产生新因果节点。
+
+        essence 保守边界（MEMORY-LIFECYCLE §3.2）：essence 几乎不 revise，只 reinforce。
+        与 ``revise`` 的「改写 = 新节点引用旧节点」不同，reinforce **不换 node_id、
+        不改 lineage**，仅把 stability/confidence 微升后原地替换注册表里的节点。
+        """
+        reinforced = replace(
+            node,
+            confidence=_bump(node.confidence, DEFAULT_REINFORCE_CONFIDENCE_BOOST),
+            stability=_bump(node.stability, DEFAULT_REINFORCE_STABILITY_BOOST),
+        )
+        self._nodes[node.node_id] = reinforced
+        return reinforced
+
+    def _essence_revise_allowed(
+        self,
+        old: ElevationNode,
+        *,
+        valence: Optional[Valence],
+        evidence_ids: Sequence[str],
+        new_confidence: Optional[float],
+    ) -> bool:
+        """essence 修订高门槛（MEMORY-LIFECYCLE §3.2）：三条件**同时**满足才允许改写。
+
+        (a) valence 反转（极性翻转）；(b) ≥2 条新独立证据；(c) confidence delta 超阈值。
+        任一不满足 → 只 reinforce，不 reconsolidation 改写。
+        """
+        if valence is None or not _valence_reversed(old.valence, valence):
+            return False
+        if len(evidence_ids) < ESSENCE_REVISE_MIN_EVIDENCE:
+            return False
+        if new_confidence is None or (
+            new_confidence - old.confidence
+        ) <= ESSENCE_REVISE_CONFIDENCE_DELTA:
+            return False
+        return True
+
     def revise(
         self,
         node_id: str,
@@ -257,6 +310,7 @@ class InternalizingEngine(ElevationEngine):
         valence: Optional[Valence] = None,
         provenance: Optional[Mapping[str, object]] = None,
         source_id: Optional[str] = None,
+        source_ids: Optional[Sequence[str]] = None,
         source_type: SourceType = "inner_life_event",
         inner_life_event_id: Optional[str] = None,
         trigger_type: str = "reconsolidation",
@@ -270,9 +324,46 @@ class InternalizingEngine(ElevationEngine):
         - **改写**：生成新节点 ``N'``：``parent_node_id=旧节点``、
           ``lineage_depth=旧+1``、``lineage_path=旧路径/新 id``；**不覆盖旧节点**。
         - **留痕**：旧节点仍有效的证据边标记 ``valid_until_ts=now``（不删 source_id）；
-          若提供 ``source_id``，为 ``N'`` 追加一条新证据边（``provenance_ref`` 指向触发事件）。
+          若提供 ``source_id``/``source_ids``，为 ``N'`` 追加新证据边（``provenance_ref``
+          指向触发事件）。
+
+        **essence 保守边界**：``old.node_type == "essence"`` 时，仅当 valence 反转 +
+        ≥2 条新独立证据 + confidence delta 超阈值才改写；否则只 ``_reinforce``
+        （stability/confidence 微升，不换 node_id、不改 lineage）。
         """
         old = self.get_node(node_id)
+
+        # 收集新证据源（source_id 单条 + source_ids 多条，向后兼容）。
+        evidence_ids: List[str] = []
+        if source_id is not None:
+            evidence_ids.append(source_id)
+        if source_ids is not None:
+            evidence_ids.extend(source_ids)
+
+        # essence 保守边界：默认只 reinforce，仅高门槛才改写。
+        if old.node_type == "essence" and not self._essence_revise_allowed(
+            old,
+            valence=valence,
+            evidence_ids=evidence_ids,
+            new_confidence=new_confidence,
+        ):
+            reinforced = self._reinforce(old)
+            self._emit(
+                "node_revised",
+                reinforced.node_id,
+                ts=_utcnow_iso(),
+                parent_node_id=None,
+                source_id=source_id,
+                provenance_ref=inner_life_event_id,
+                node_type=reinforced.node_type,
+                lineage_depth=reinforced.lineage_depth,
+                lineage_path=reinforced.lineage_path,
+                confidence_before=old.confidence,
+                confidence_after=reinforced.confidence,
+                evidence_source_ids=evidence_ids,
+                reason="reinforced_only",
+            )
+            return reinforced
 
         # 重估：旧节点上下文经 provenance 注入，供 LLM 做新旧对比。
         merged: Dict[str, object] = dict(provenance or {})
@@ -317,14 +408,14 @@ class InternalizingEngine(ElevationEngine):
         # 留痕：旧节点仍有效的证据边 valid_until_ts = now（不删 source_id）。
         self._supersede_edges(old.node_id, now)
 
-        # 触发修订的新证据边（若提供 source_id）。
-        if source_id is not None:
+        # 触发修订的新证据边（每条新证据源一条边）。
+        for eid in evidence_ids:
             self._edges.append(
                 EvidenceEdge(
                     edge_id=new_id(),
                     node_id=new_node_id,
                     source_type=source_type,
-                    source_id=source_id,
+                    source_id=eid,
                     agent_id=new_node.agent_id,
                     weight=1.0,
                     valid_from_ts=now,
@@ -346,7 +437,7 @@ class InternalizingEngine(ElevationEngine):
             lineage_path=new_node.lineage_path,
             confidence_before=old.confidence,
             confidence_after=new_node.confidence,
-            evidence_source_ids=[source_id] if source_id is not None else [],
+            evidence_source_ids=evidence_ids,
             reason="reconsolidated_by_new_evidence",
         )
 
@@ -384,6 +475,9 @@ class InternalizingEngine(ElevationEngine):
             raise ValueError(f"decay_rate must be in (0.0, 1.0), got {decay_rate!r}")
         now = fade_ts or _utcnow_iso()
         node = self._nodes.get(node_id)
+        # essence 豁免 decay（MEMORY-LIFECYCLE §3.2）：essence 是语义核心，不淡化。
+        if node is not None and node.node_type == "essence":
+            return []
         faded: List[EvidenceEdge] = []
         for i, edge in enumerate(self._edges):
             if edge.node_id == node_id and edge.valid_until_ts is None:
@@ -435,6 +529,12 @@ class InternalizingEngine(ElevationEngine):
         """
         if not node_ids:
             raise ValueError("forget requires at least one node_id")
+
+        # essence 豁免 forget（MEMORY-LIFECYCLE §3.2）：essence 是语义核心，不可被
+        # 「抽象掉」。先整体校验，避免对前面节点做了淡化后才撞到 essence（部分副作用）。
+        for nid in node_ids:
+            if self.get_node(nid).node_type == "essence":
+                raise ValueError(f"essence node {nid!r} is exempt from forget")
 
         # ① 情景细节淡化
         faded_nodes: List[ElevationNode] = []

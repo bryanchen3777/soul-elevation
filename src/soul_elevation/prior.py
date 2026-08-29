@@ -19,7 +19,7 @@ Prior = Tuple[NodeType, ...]
 
 # —— 固定先验（源类型 → 维度）——
 _PRIOR_BELIEF: Prior = ("belief",)
-_PRIOR_ESSENCE_TRAIT: Prior = ("essence", "trait")
+_PRIOR_TRAIT: Prior = ("trait",)
 _PRIOR_VALUE_TRAIT_BELIEF: Prior = ("value", "trait", "belief")
 
 # —— 类别相关先验（llm_judge.category → 维度）——
@@ -27,23 +27,25 @@ _PRIOR_VALUE_TRAIT_BELIEF: Prior = ("value", "trait", "belief")
 # 不另起一套（保真：分类已有、语义已验证）。
 CATEGORY_PRIOR_TABLE: Mapping[str, Prior] = {
     "preference_plan_event_fact": _PRIOR_BELIEF,   # 偏好/计划/事件/事实 → 认知信念
-    "milestone": ("essence",),                      # 里程碑 → 内涵
+    "milestone": ("value",),                        # 里程碑 → 价值（单条不产 essence）
     "diary": ("value", "trait"),                    # 自指内省 → 价值/性格
 }
 
 # —— 主映射表：trigger_type（活动类型）→ 先验 ——
+# essence 保守边界（MEMORY-LIFECYCLE §3.2）：essence 永不作为任何单一事件的 primary
+# prior，只能经 consolidation（多条一致证据聚合，即 forget 的抽象语义节点）产生。
 PRIOR_TABLE: Mapping[str, Prior] = {
     # 看新闻：关于外部世界的断言 → 世界观信念（不进性格/内涵，避免「看一篇新闻就改性格」失真）
     "world:news_event": _PRIOR_BELIEF,
-    # 现实活动：塑造「这个人如何生活」的内涵 + 少量性格
-    "world:calendar_event": _PRIOR_ESSENCE_TRAIT,
-    "user_going_outside": _PRIOR_ESSENCE_TRAIT,
+    # 现实活动：塑造「这个人如何生活」的性格倾向（单条不产 essence）
+    "world:calendar_event": _PRIOR_TRAIT,
+    "user_going_outside": _PRIOR_TRAIT,
     # 日记/自我内省：自指方向最强 → 价值/性格/信念
     "diary:morning": _PRIOR_VALUE_TRAIT_BELIEF,
     "diary:night": _PRIOR_VALUE_TRAIT_BELIEF,
-    # 梦：潜意识投影，单条低置信度、累积升格 → 内涵 + 性格
-    "dream:dream": _PRIOR_ESSENCE_TRAIT,
-    "dream:event": _PRIOR_ESSENCE_TRAIT,
+    # 梦：潜意识投影，单条低置信度、累积升格 → 性格倾向（单条不产 essence）
+    "dream:dream": _PRIOR_TRAIT,
+    "dream:event": _PRIOR_TRAIT,
 }
 
 # 类别相关 trigger_type：其先验不固定，依 provenance 里的 llm_judge.category 决定。

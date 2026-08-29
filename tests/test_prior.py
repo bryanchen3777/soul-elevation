@@ -13,9 +13,9 @@ def test_news_maps_to_belief():
     assert resolve_prior("world:news_event") == ("belief",)
 
 
-def test_leisure_maps_to_essence_trait():
-    assert resolve_prior("world:calendar_event") == ("essence", "trait")
-    assert resolve_prior("user_going_outside") == ("essence", "trait")
+def test_leisure_maps_to_trait():
+    assert resolve_prior("world:calendar_event") == ("trait",)
+    assert resolve_prior("user_going_outside") == ("trait",)
 
 
 def test_diary_maps_to_value_trait_belief():
@@ -23,9 +23,9 @@ def test_diary_maps_to_value_trait_belief():
     assert resolve_prior("diary:night") == ("value", "trait", "belief")
 
 
-def test_dream_maps_to_essence_trait():
-    assert resolve_prior("dream:dream") == ("essence", "trait")
-    assert resolve_prior("dream:event") == ("essence", "trait")
+def test_dream_maps_to_trait():
+    assert resolve_prior("dream:dream") == ("trait",)
+    assert resolve_prior("dream:event") == ("trait",)
 
 
 def test_conversation_by_category():
@@ -36,7 +36,7 @@ def test_conversation_by_category():
     assert resolve_prior(
         "conversation:user_message",
         {"llm_judge": {"category": "milestone"}},
-    ) == ("essence",)
+    ) == ("value",)
     assert resolve_prior(
         "conversation:user_message",
         {"llm_judge": {"category": "diary"}},
@@ -45,7 +45,7 @@ def test_conversation_by_category():
 
 def test_memory_fact_by_category():
     assert resolve_prior("memory_fact", {"category": "preference_plan_event_fact"}) == ("belief",)
-    assert resolve_prior("memory_fact", {"category": "milestone"}) == ("essence",)
+    assert resolve_prior("memory_fact", {"category": "milestone"}) == ("value",)
 
 
 def test_category_triggers_are_category_dependent():
@@ -73,5 +73,5 @@ def test_prior_table_is_explicit_mapping_not_ifelse():
     assert PRIOR_TABLE["world:news_event"] == ("belief",)
     assert PRIOR_TABLE["diary:night"] == ("value", "trait", "belief")
     assert CATEGORY_PRIOR_TABLE["preference_plan_event_fact"] == ("belief",)
-    assert CATEGORY_PRIOR_TABLE["milestone"] == ("essence",)
+    assert CATEGORY_PRIOR_TABLE["milestone"] == ("value",)
     assert CATEGORY_PRIOR_TABLE["diary"] == ("value", "trait")

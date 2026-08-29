@@ -29,11 +29,10 @@ def test_news_maps_to_belief_node():
     assert nodes[0].node_type == "belief"
 
 
-def test_leisure_maps_to_essence_trait():
+def test_leisure_maps_to_trait():
     eng = InternalizingEngine(StubElevationLLM())
     nodes = eng.consume(_inp(event_type="user_going_outside", content="今天去爬山"))
-    assert nodes[0].node_type in ("essence", "trait")
-    assert nodes[0].node_type == "essence"  # 默认 stub 沿用先验基调
+    assert nodes[0].node_type == "trait"  # 默认 stub 沿用先验基调（essence 已从 primary prior 移除）
 
 
 def test_diary_maps_to_value_trait_belief():
@@ -61,7 +60,7 @@ def test_conversation_by_category():
             provenance={"llm_judge": {"category": "milestone"}},
         )
     )[0]
-    assert milestone.node_type == "essence"
+    assert milestone.node_type == "value"
 
 
 # —— LLM 后验覆盖先验 ——
