@@ -32,6 +32,33 @@
 - `elevate(pattern_node_id, ...)`：证据累积达阈值（默认 `min_evidence=2`，可配）后，把 pattern 升华成 belief/value/trait/essence。升华维度默认取 LLM 后验候选，也可显式传入（如由 prior 表决定）。升华后 **pattern 保留**（灵魂节点以 `parent_node_id=pattern` 挂因果树；pattern 的有效证据边标记 `valid_until_ts` superseded 留痕，灵魂节点新建证据边回指同一批 `source_id`）。
 - 证据不足（< 阈值）时 `elevate` 抛 `ValueError`——LLM 说「这是信念」不算数，证据说了算。
 
+## SE-1 Evidence Independence（独立证据）
+
+`min_evidence=2` 必须是 2 个**独立** evidence，不是 2 笔 record。
+
+- **Independence contract**：`evidence_key = (source_id, event_identity)`，`event_identity = novelty_id | inner_life_event_id | explicit event_id`（按此优先级取 provenance；`inner_life_event` 源的事件身份即其 `source_id`）。
+- 同一 `source_id` **或** 同一 `event_identity` → 同一份独立证据（计 1）：重复 ingest / 同一 source 重送 / 同一事件两笔 memory record / 一次 InnerLifeEvent 抽多条 fact / 同一场 weather·news 轮询连打 → 都计 1。
+- 不同 source **且** 不同 event identity（或 event identity 缺失）→ 才独立。
+- 0 embedding / similarity 代码：只做集合成员判断。
+
+## SE-2 Pattern Terminal Semantics（Pattern 是合法终态）
+
+Pattern 是**合法终态**，不是升华候车室。
+
+- `consume()` → candidate Pattern；`elevate()` → accepted Soul-level node（belief/value/trait/essence）。
+- Pattern 可长期存在，即使永远不 elevate；**未 elevate ≠ 失败**。单次 `consume()` 只得到 Pattern；Pattern 可 query / persist，不 elevate 也不消失不报错。
+- `consume()` 不直接写 Soul state（只写本引擎自有注册表）。
+- WorldEvent → Pattern 允许；WorldEvent → trait/essence 直接路径 v1 禁止。
+- **Soul destination（v1 边界）**：当前升华目标只有 meaning/identity 维度（belief / value / trait / essence）；competence（knowledge / capability）reserved / out of scope，不实作。
+- `forget()` 不改名：该 API 目前同时承担 decay + consolidate，长期语义应拆，但本票不动 API（见 `engine.py` 内 architecture note）。
+
+## SE-3 Lineage vs Evidence（两图职责锁死）
+
+- **Lineage** = How did this node evolve?（`parent_node_id` / `lineage_depth` / `lineage_path`）
+- **Evidence** = What supports this node?（`EvidenceEdge` 回指原始 source）
+- N1→N2（reconsolidation）= **lineage ≠ evidence**：即使 N2 吸收 N1 的 evidence，N1→N2 仍只是 lineage，N2 的 supporting evidence 仍是原始独立 evidence keys，不得因吸收就把 N1 本身算成一份新 evidence。
+- 程式内 invariant：`InternalizingEngine.check_invariants()` 断言任何 `EvidenceEdge.source_id` 绝不指向 ElevationNode（lineage 节点不是证据），每次 consume / elevate / revise / forget 变更后自动校验。
+
 ## 数据模型（第一阶段）
 
 ### `ElevationNode` — 信念/价值/性格/内涵/模式节点
@@ -108,9 +135,9 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pytest -v
 ```
 
-## 不做（第一阶段 Out of Scope）
+## 不做（Out of Scope）
 
-- 不实现 `consume` 的完整升华逻辑（后续阶段）。
 - 不 import Soul OS 任何模块。
 - 不改 frozen contract（InnerLifeEvent / TriggerEnvelope / Agency 4 stages / SAGE 写入逻辑）。
-- 不 push GitHub（本地 repo 即可）。
+- 不加 embedding / vector DB / graph DB / scoring framework / 新 persistence layer。
+- 不实作 competence（knowledge / capability）——reserved / out of scope。

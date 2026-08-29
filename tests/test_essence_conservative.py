@@ -34,9 +34,17 @@ def _essence_engine(confidence=0.3):
 
 
 def _essence_node(eng, valence="positive"):
-    """两次一致事件 → 2 个 pattern（candidate=essence）→ elevate 出 essence。"""
-    p1 = eng.consume(_inp(content="我温柔而疏离", provenance={"valence": valence}))[0]
-    eng.consume(_inp(content="我温柔而疏离", provenance={"valence": valence}))[0]
+    """两次**独立**事件 → 2 个 pattern（candidate=essence）→ elevate 出 essence。
+
+    SE-1 Evidence Independence：两笔 record 必须来自不同 source（独立事件），
+    同事件重送只计 1 份独立证据，过不了 min_evidence=2 门槛。
+    """
+    p1 = eng.consume(
+        _inp(content="我温柔而疏离", provenance={"valence": valence}, source_id="evt-1")
+    )[0]
+    eng.consume(
+        _inp(content="我温柔而疏离", provenance={"valence": valence}, source_id="evt-2")
+    )[0]
     return eng.elevate(p1.node_id)
 
 

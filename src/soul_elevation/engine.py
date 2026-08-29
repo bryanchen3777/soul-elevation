@@ -24,6 +24,25 @@ trace 写失败只告警、不阻断主路径（失败隔离）。
 
 零 Soul OS 依赖：Soul OS 通过 adapter 把 InnerLifeEvent + Memory 映射成
 ``ElevationInput`` 后喂进来，本模块不感知上游任何类型。
+
+**SE-1 Evidence Independence**：``elevate`` 的 ``min_evidence`` 数的是**独立**
+evidence（``evidence_key = (source_id, event_identity)``），不是 record 数。
+同一 source_id 或同一 event identity → 计 1；不同 source 且不同 event identity
+→ 才独立。0 embedding / similarity 代码。
+
+**SE-2 Pattern Terminal Semantics**：Pattern 是**合法终态**，不是升华候车室。
+``consume()`` → candidate Pattern；``elevate()`` → accepted Soul-level node。
+Pattern 可长期存在，即使永远不 elevate；未 elevate ≠ 失败。``consume()``
+不直接写 Soul state（只写本引擎自有注册表）。WorldEvent → Pattern 允许，
+WorldEvent → trait/essence 直接路径 v1 禁止。Soul destination 只有
+meaning/identity（belief/value/trait/essence），competence reserved/out of scope。
+
+**SE-3 Lineage vs Evidence**：两图职责锁死。Lineage = How did this node evolve?
+（``parent_node_id`` / ``lineage_depth`` / ``lineage_path``）；Evidence = What
+supports this node?（``EvidenceEdge`` 回指原始 source）。N1→N2（reconsolidation）
+= lineage ≠ evidence；即使 N2 吸收 N1 的 evidence，N1 本身也**不是** N2 的
+evidence。``check_invariants()`` 程式内断言：证据边 source_id 绝不指向
+ElevationNode（lineage 节点不是证据）。
 """
 
 from __future__ import annotations
@@ -97,6 +116,51 @@ def _valence_reversed(old: Valence, new: Valence) -> bool:
     )
 
 
+def _resolve_event_identity(input: ElevationInput) -> Optional[str]:
+    """解析输入的事件身份（event identity，SE-1）。
+
+    ``event_identity = novelty_id | inner_life_event_id | explicit event_id``
+    （按此优先级取 provenance 中第一个非空值）；``inner_life_event`` 源的事件
+    身份即其 ``source_id``（canonical event）。返回 None 表示无事件身份
+    （此时独立性只由 source_id 决定）。
+    """
+    if input.source_type == "inner_life_event":
+        return input.source_id
+    for key in ("novelty_id", "inner_life_event_id", "event_id"):
+        value = input.provenance.get(key)
+        if value:
+            return value
+    return None
+
+
+def _count_independent_evidence(edges: Sequence[EvidenceEdge]) -> int:
+    """数**独立** evidence（SE-1 Evidence Independence）。
+
+    Independence contract：``evidence_key = (source_id, event_identity)``。
+    同一 source_id **或** 同一 event identity → 同一份独立证据（计 1）：
+
+    - 重复 ingest / 同一 source 重送 → 同 source_id → 1
+    - 同一事件两笔 memory record / 一次 InnerLifeEvent 抽多条 fact /
+      同一场 weather·news 轮询连打 → 同 event identity → 1
+
+    不同 source **且** 不同 event identity（或 event identity 缺失）→ 才独立。
+    0 embedding / similarity：只做集合成员判断。
+    """
+    seen_sources: set = set()
+    seen_events: set = set()
+    count = 0
+    for e in edges:
+        if e.source_id in seen_sources:
+            continue
+        if e.inner_life_event_id is not None and e.inner_life_event_id in seen_events:
+            continue
+        seen_sources.add(e.source_id)
+        if e.inner_life_event_id is not None:
+            seen_events.add(e.inner_life_event_id)
+        count += 1
+    return count
+
+
 class ElevationEngine(ABC):
     """升华引擎接口。
 
@@ -167,6 +231,32 @@ class InternalizingEngine(ElevationEngine):
         except KeyError:
             raise KeyError(f"node not found: {node_id!r}") from None
 
+    def check_invariants(self) -> None:
+        """程式内 invariant（SE-3 Lineage vs Evidence）：两图职责锁死。
+
+        - **Evidence 绝不指向 ElevationNode**：任何 ``EvidenceEdge.source_id``
+          不得是注册表里的节点 id——lineage 节点（N1）不是证据，N2 的 supporting
+          evidence 永远是原始独立 evidence keys。
+        - **Lineage 完整性**：任何节点的 ``parent_node_id``（演化边）必须指向
+          注册表里真实存在的节点。
+
+        违反任一 → 抛 ``AssertionError``（fail fast）。consume / elevate /
+        revise / forget 每次变更后自动调用。
+        """
+        node_ids = set(self._nodes)
+        for e in self._edges:
+            if e.source_id in node_ids:
+                raise AssertionError(
+                    f"evidence edge {e.edge_id} references elevation node "
+                    f"{e.source_id!r} as source — lineage nodes are not evidence"
+                )
+        for n in self._nodes.values():
+            if n.parent_node_id is not None and n.parent_node_id not in node_ids:
+                raise AssertionError(
+                    f"lineage parent {n.parent_node_id!r} of node {n.node_id!r} "
+                    f"not in registry"
+                )
+
     def _emit(
         self,
         event_type: str,
@@ -217,6 +307,8 @@ class InternalizingEngine(ElevationEngine):
 
         # 3) 产出 pattern 节点（consolidation 输出，候选）+ edge
         #    （双时序：valid_from_ts=now，valid_until_ts=None）
+        #    consume() 只写本引擎自有注册表（_nodes / _edges），**不直接写
+        #    Soul state**（SE-2：consume → candidate Pattern，非灵魂结构）。
         now = _utcnow_iso()
         node_id = new_id()
 
@@ -227,12 +319,10 @@ class InternalizingEngine(ElevationEngine):
                 f"invalid valence {valence!r}; expected one of {sorted(VALID_VALENCES)}"
             )
 
-        # 触发本节点的 canonical event：inner_life_event 源即其 source_id，其余取 provenance。
-        canonical_event_id = (
-            input.source_id
-            if input.source_type == "inner_life_event"
-            else input.provenance.get("inner_life_event_id")
-        )
+        # 触发本节点的 canonical event（event identity，SE-1）：
+        # inner_life_event 源即其 source_id；其余按 novelty_id | inner_life_event_id
+        # | explicit event_id 优先级取 provenance。
+        canonical_event_id = _resolve_event_identity(input)
 
         node = ElevationNode(
             node_id=node_id,
@@ -280,6 +370,7 @@ class InternalizingEngine(ElevationEngine):
             reason="internalized",
         )
 
+        self.check_invariants()  # SE-3：变更后锁两图职责
         return [node]
 
     # —— Consolidation ≠ Elevation：pattern → 灵魂结构升华 ——
@@ -309,9 +400,12 @@ class InternalizingEngine(ElevationEngine):
         灵魂结构。升华维度默认取 pattern 的 LLM 后验候选（``candidate_node_type``，
         interpretation），也可显式传入 ``node_type``（如由 prior 表决定）。
 
-        - **证据累积**：聚合所有与目标 pattern 同候选维度（``candidate_node_type``
-          相同）的 pattern 的**有效证据边**（``valid_until_ts is None``）；总数
-          < ``min_evidence`` 时抛 ``ValueError``（证据不足，不升华）。
+        - **独立证据累积（SE-1）**：聚合所有与目标 pattern 同候选维度
+          （``candidate_node_type`` 相同）的 pattern 的**有效证据边**
+          （``valid_until_ts is None``），按 ``evidence_key = (source_id,
+          event_identity)`` 数**独立** evidence（同一 source_id 或同一 event
+          identity → 计 1）；独立数 < ``min_evidence`` 时抛 ``ValueError``
+          （证据不足，不升华）。
         - **pattern 保留**：升华后 pattern 节点仍在注册表；灵魂节点以
           ``parent_node_id=pattern`` 挂到因果树（改写不覆盖），pattern 的有效证据边
           标记 ``valid_until_ts=now``（superseded 留痕），灵魂节点新建证据边回指
@@ -337,9 +431,13 @@ class InternalizingEngine(ElevationEngine):
         active_edges: List[EvidenceEdge] = []
         for n in group:
             active_edges.extend(self._active_edges(n.node_id))
-        if len(active_edges) < min_evidence:
+        # SE-1 Evidence Independence：min_evidence 数的是**独立** evidence
+        # （evidence_key = (source_id, event_identity)），不是 record 数。
+        independent = _count_independent_evidence(active_edges)
+        if independent < min_evidence:
             raise ValueError(
-                f"insufficient evidence to elevate: {len(active_edges)} < {min_evidence}"
+                f"insufficient independent evidence to elevate: "
+                f"{independent} < {min_evidence}"
             )
 
         # 升华维度：显式 node_type（prior 表决定）或 LLM 后验候选（interpretation）。
@@ -430,6 +528,7 @@ class InternalizingEngine(ElevationEngine):
             reason="evidence_threshold_met",
         )
 
+        self.check_invariants()  # SE-3：变更后锁两图职责
         return soul_node
 
     # —— 第三阶段：reconsolidation 式信念修订 ——
@@ -534,6 +633,7 @@ class InternalizingEngine(ElevationEngine):
                 evidence_source_ids=evidence_ids,
                 reason="reinforced_only",
             )
+            self.check_invariants()  # SE-3：变更后锁两图职责
             return reinforced
 
         # 重估：旧节点上下文经 provenance 注入，供 LLM 做新旧对比。
@@ -621,6 +721,7 @@ class InternalizingEngine(ElevationEngine):
             reason="reconsolidated_by_new_evidence",
         )
 
+        self.check_invariants()  # SE-3：变更后锁两图职责
         return new_node
 
     def _supersede_edges(self, node_id: str, ts: str) -> List[EvidenceEdge]:
@@ -699,6 +800,10 @@ class InternalizingEngine(ElevationEngine):
         inner_life_event_id: Optional[str] = None,
     ) -> ElevationNode:
         """升华式遗忘：情景细节淡化 + 语义核心强化（**非删除**）。
+
+        **Architecture note（SE-2）**：本 API 目前同时承担 decay（情景淡化）与
+        consolidate（语义核心聚合）两个职责；长期语义应拆分为两个独立 API
+        （decay 与 consolidate 分离），但本票**不改动 API**，仅记录架构意图。
 
         ① **情景细节淡化**：对每个输入节点做 ``decay``（降权重 + ``valid_until_ts``
            标记），原文 source_id 永远保留。
@@ -802,4 +907,5 @@ class InternalizingEngine(ElevationEngine):
             reason="semantic_core_reinforced",
         )
 
+        self.check_invariants()  # SE-3：变更后锁两图职责
         return semantic_node

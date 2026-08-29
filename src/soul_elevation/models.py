@@ -6,6 +6,15 @@ Mem0 fact 级、GA lossy 摘要）都丢证据链 / 置信度，会失真。
 
 零 Soul OS 依赖：本模块不 import 任何 Soul OS 类型；证据正文不复制进节点，
 只保留证据边索引（source_id）回查原文。
+
+**Soul destination（v1 边界，SE-2）**：当前升华目标只有 meaning/identity 维度
+（belief / value / trait / essence）；competence（knowledge / capability）
+reserved / out of scope，本票不实作。**Pattern 是合法终态**：可长期存在，
+即使永远不 elevate；未 elevate ≠ 失败（不是升华候车室）。
+
+**Evidence Independence（SE-1）**：``evidence_key = (source_id, event_identity)``，
+``event_identity = novelty_id | inner_life_event_id | explicit event_id``。
+同一 source_id 或同一 event identity → 同一份独立证据（计 1）。
 """
 
 from __future__ import annotations
@@ -42,6 +51,20 @@ def new_id() -> str:
     采用 uuid4().hex 语义，但独立命名空间（不复用上游的 generate_event_id）。
     """
     return uuid.uuid4().hex
+
+
+def evidence_key(source_id: str, event_identity: Optional[str]) -> tuple:
+    """独立证据键（SE-1 Evidence Independence contract）。
+
+    ``evidence_key = (source_id, event_identity)``；``event_identity`` 取
+    ``novelty_id | inner_life_event_id | explicit event_id`` 之一（可为 None）。
+
+    同一 source_id + 同一 event identity → 同一份独立证据（计 1）：
+    重复 ingest / 同一 source 重送 / 同一事件两笔 memory record /
+    一次 InnerLifeEvent 抽多条 fact / 同一场 weather·news 轮询连打 → 都计 1。
+    不同 source 且不同 event identity（或 event identity 缺失）→ 才独立。
+    """
+    return (source_id, event_identity)
 
 
 def _ensure_unit_interval(name: str, value: float) -> None:

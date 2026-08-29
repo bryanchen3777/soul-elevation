@@ -156,8 +156,8 @@ def test_elevate_supersedes_pattern_edges_and_creates_soul_edges():
 
 def test_elevate_boosts_stability():
     eng = _engine()
-    p1 = eng.consume(_inp())[0]
-    eng.consume(_inp())
+    p1 = eng.consume(_inp(source_id="evt-1"))[0]
+    eng.consume(_inp(source_id="evt-2"))  # 独立事件（SE-1：同事件重送只计 1）
     soul = eng.elevate(p1.node_id)
     assert soul.stability > p1.stability  # 证据累积 → 更稳定（slower change）
 

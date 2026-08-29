@@ -23,6 +23,7 @@ from .models import (
     ElevationInput,
     ElevationNode,
     EvidenceEdge,
+    evidence_key,
     new_id,
 )
 from .prior import (
@@ -56,6 +57,7 @@ __all__ = [
     "VALID_SOURCE_TYPES",
     "VALID_VALENCES",
     "DEFAULT_ELEVATE_MIN_EVIDENCE",
+    "evidence_key",
     "new_id",
     "PRIOR_TABLE",
     "CATEGORY_PRIOR_TABLE",
