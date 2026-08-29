@@ -9,9 +9,14 @@
 read_trace / rebuild_lineage）。
 """
 
-from .engine import ElevationEngine, InternalizingEngine
+from .engine import (
+    DEFAULT_ELEVATE_MIN_EVIDENCE,
+    ElevationEngine,
+    InternalizingEngine,
+)
 from .llm import Classification, ElevationLLM, StubElevationLLM
 from .models import (
+    SOUL_NODE_TYPES,
     VALID_NODE_TYPES,
     VALID_SOURCE_TYPES,
     VALID_VALENCES,
@@ -47,8 +52,10 @@ __all__ = [
     "Classification",
     "StubElevationLLM",
     "VALID_NODE_TYPES",
+    "SOUL_NODE_TYPES",
     "VALID_SOURCE_TYPES",
     "VALID_VALENCES",
+    "DEFAULT_ELEVATE_MIN_EVIDENCE",
     "new_id",
     "PRIOR_TABLE",
     "CATEGORY_PRIOR_TABLE",

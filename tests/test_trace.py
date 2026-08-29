@@ -44,6 +44,7 @@ class _NullLogger:
 
 def test_event_types_cover_required_set():
     assert {"node_created", "node_revised", "edge_decayed", "node_forgotten"} <= EVENT_TYPES
+    assert "node_elevated" in EVENT_TYPES  # pattern → 灵魂结构升华审计事件
 
 
 def test_build_event_has_required_fields():
@@ -188,6 +189,24 @@ def test_forget_emits_node_forgotten_and_edge_decayed(tmp_path):
     assert set(forgotten["evidence_source_ids"]) == {"mem-rain", "mem-umbrella"}
     # forget 内部对每个情景节点做 decay → 2 条 edge_decayed。
     assert types.count("edge_decayed") == 2
+
+
+def test_elevate_emits_node_elevated(tmp_path):
+    w = _writer(tmp_path)
+    eng = InternalizingEngine(StubElevationLLM(), trace_writer=w)
+    p1 = eng.consume(_inp(source_id="evt-1"))[0]
+    eng.consume(_inp(source_id="evt-2"))
+    soul = eng.elevate(p1.node_id)
+
+    records = read_trace(w.path)
+    elevated = [r for r in records if r["event_type"] == "node_elevated"]
+    assert len(elevated) == 1
+    rec = elevated[0]
+    assert rec["node_id"] == soul.node_id
+    assert rec["parent_node_id"] == p1.node_id  # 因果树 parent 关系
+    assert rec["node_type"] == "value"
+    assert set(rec["evidence_source_ids"]) == {"evt-1", "evt-2"}
+    assert rec["reason"] == "evidence_threshold_met"
 
 
 # —— reader 边界 ——

@@ -66,9 +66,11 @@ def test_revise_uses_llm_reassessment():
     llm = StubElevationLLM(keyword_map={"自由": "value"})
     eng = InternalizingEngine(llm)
     old = eng.consume(_inp(event_type="world:news_event", content="世界很危险"))[0]
-    assert old.node_type == "belief"
-    new = eng.revise(old.node_id, "我感悟到自由")  # 命中 keyword → value
-    assert new.node_type == "value"
+    assert old.node_type == "pattern"
+    assert old.candidate_node_type == "belief"
+    new = eng.revise(old.node_id, "我感悟到自由")  # 命中 keyword → 候选维度变 value
+    assert new.node_type == "pattern"  # 修订产出仍是候选 pattern
+    assert new.candidate_node_type == "value"
 
 
 def test_revise_new_confidence_overrides_llm():

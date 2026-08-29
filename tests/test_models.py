@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from soul_elevation.models import (
+    SOUL_NODE_TYPES,
     VALID_NODE_TYPES,
     VALID_SOURCE_TYPES,
     VALID_VALENCES,
@@ -66,9 +67,32 @@ def test_node_is_frozen():
 
 
 def test_node_type_vocabulary():
-    assert sorted(VALID_NODE_TYPES) == ["belief", "essence", "trait", "value"]
+    # pattern 是第 5 类节点（consolidation 输出，非灵魂结构）。
+    assert sorted(VALID_NODE_TYPES) == ["belief", "essence", "pattern", "trait", "value"]
+    assert sorted(SOUL_NODE_TYPES) == ["belief", "essence", "trait", "value"]
     with pytest.raises(ValueError):
         _node(node_type="memory")
+
+
+def test_pattern_node_accepts_candidate_node_type():
+    # pattern 节点可带 LLM 后验候选维度（interpretation，非 truth）。
+    p = _node(node_type="pattern", candidate_node_type="belief")
+    assert p.node_type == "pattern"
+    assert p.candidate_node_type == "belief"
+
+
+def test_candidate_node_type_must_be_soul_dimension():
+    # 候选维度必须是灵魂结构（belief/value/trait/essence），pattern 自身不可作候选。
+    with pytest.raises(ValueError):
+        _node(node_type="pattern", candidate_node_type="pattern")
+    with pytest.raises(ValueError):
+        _node(node_type="pattern", candidate_node_type="memory")
+
+
+def test_soul_node_candidate_defaults_none():
+    # 灵魂结构节点不携带候选维度（默认 None）。
+    n = _node(node_type="belief")
+    assert n.candidate_node_type is None
 
 
 def test_confidence_stability_bounds():

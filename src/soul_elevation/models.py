@@ -15,14 +15,21 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Literal, Optional
 
 # —— 词汇表（frozen，作为运行时校验依据）——
-NodeType = Literal["belief", "value", "trait", "essence"]
+# pattern 是第 5 类节点：consolidation 输出（候选），**非灵魂结构**。
+# 灵魂结构 = belief / value / trait / essence（SOUL_NODE_TYPES），只能经 elevate()
+# 由 pattern 升华产生，单一事件不直接产灵魂结构（Consolidation ≠ Elevation 边界）。
+NodeType = Literal["belief", "value", "trait", "essence", "pattern"]
 Valence = Literal["positive", "negative", "neutral"]
 # world_event 是 additive 扩展：Soul OS 的 world→elevation 直通 adapter 把
 # WorldEvent（news/weather/calendar）直接映射成 ElevationInput，不经 InnerLifeEvent。
 # 既有 3 值（v1_memory / sage_fact / inner_life_event）语义 0 变更。
 SourceType = Literal["v1_memory", "sage_fact", "inner_life_event", "world_event"]
 
-VALID_NODE_TYPES: frozenset = frozenset({"belief", "value", "trait", "essence"})
+VALID_NODE_TYPES: frozenset = frozenset(
+    {"belief", "value", "trait", "essence", "pattern"}
+)
+# 灵魂结构子集：elevate() 的合法升华目标维度（pattern 自身不可作为升华目标）。
+SOUL_NODE_TYPES: frozenset = frozenset({"belief", "value", "trait", "essence"})
 VALID_VALENCES: frozenset = frozenset({"positive", "negative", "neutral"})
 VALID_SOURCE_TYPES: frozenset = frozenset(
     {"v1_memory", "sage_fact", "inner_life_event", "world_event"}
@@ -44,15 +51,20 @@ def _ensure_unit_interval(name: str, value: float) -> None:
 
 @dataclass(frozen=True)
 class ElevationNode:
-    """信念/价值/性格/内涵节点（四类统一 schema）。
+    """信念/价值/性格/内涵/模式节点（五类统一 schema）。
 
     **关键保真设计**：节点本身**不含**摘要化的「证据正文」——证据正文永远留在
     证据边指向的 Memory / Fact / Event 里。节点只带 ``content`` + ``confidence`` +
     ``stability`` + 证据边索引，避免「摘要化导致证据丢失」这一现有系统的共性失真。
+
+    **Consolidation ≠ Elevation 边界**：``node_type="pattern"`` 是 consolidation
+    输出（候选，非灵魂结构）；``candidate_node_type`` 只对 pattern 节点有意义，
+    承载 LLM 后验的**候选解释**维度（interpretation，非 truth）——证据累积达阈值
+    后由 ``elevate()`` 升华成 belief/value/trait/essence 时才成为灵魂事实。
     """
 
     node_id: str                      # 32-hex（独立命名空间）
-    node_type: NodeType               # belief / value / trait / essence
+    node_type: NodeType               # belief / value / trait / essence / pattern
     content: str                      # 自然语言命题
     confidence: float                 # 0.0-1.0，由证据链聚合而来
     stability: float                  # 0.0-1.0，被 reconsolidation 次数 + 一致证据数决定
@@ -65,11 +77,18 @@ class ElevationNode:
     # —— 审计 ——
     created_ts: str                   # ISO 8601 UTC
     provenance_ref: Optional[str]     # 触发本节点的上游事件 id（join 回 trace）
+    # —— Consolidation ≠ Elevation：LLM 后验候选解释（仅 pattern 节点使用）——
+    candidate_node_type: Optional[NodeType] = None  # 候选灵魂维度（interpretation，非 truth）
 
     def __post_init__(self) -> None:
         if self.node_type not in VALID_NODE_TYPES:
             raise ValueError(
                 f"invalid node_type {self.node_type!r}; expected one of {sorted(VALID_NODE_TYPES)}"
+            )
+        if self.candidate_node_type is not None and self.candidate_node_type not in SOUL_NODE_TYPES:
+            raise ValueError(
+                f"invalid candidate_node_type {self.candidate_node_type!r}; "
+                f"expected one of {sorted(SOUL_NODE_TYPES)}"
             )
         if self.valence not in VALID_VALENCES:
             raise ValueError(

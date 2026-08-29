@@ -1,4 +1,9 @@
-"""consume() 内化映射（先验 + 后验 → node + edge）单元测试。"""
+"""consume() 内化映射（先验 + 后验 → pattern 候选节点 + edge）单元测试。
+
+Consolidation ≠ Elevation 边界：单一事件只产 ``pattern`` 节点（候选），LLM 后验
+维度作为 ``candidate_node_type``（interpretation，非 truth）；灵魂结构须经
+``elevate`` 证据累积后升华。
+"""
 
 import pytest
 
@@ -19,27 +24,30 @@ def _inp(**overrides):
     return ElevationInput(**defaults)
 
 
-# —— 各 trigger_type → node_type 先验（经默认 stub 沿用基调）——
+# —— 各 trigger_type → 候选维度（经默认 stub 沿用先验基调）——
 
 
-def test_news_maps_to_belief_node():
+def test_news_maps_to_pattern_with_belief_candidate():
     eng = InternalizingEngine(StubElevationLLM())
     nodes = eng.consume(_inp(event_type="world:news_event", content="世界很危险"))
     assert len(nodes) == 1
-    assert nodes[0].node_type == "belief"
+    assert nodes[0].node_type == "pattern"  # 单一事件只产候选 pattern
+    assert nodes[0].candidate_node_type == "belief"
 
 
-def test_leisure_maps_to_trait():
+def test_leisure_maps_to_pattern_with_trait_candidate():
     eng = InternalizingEngine(StubElevationLLM())
     nodes = eng.consume(_inp(event_type="user_going_outside", content="今天去爬山"))
-    assert nodes[0].node_type == "trait"  # 默认 stub 沿用先验基调（essence 已从 primary prior 移除）
+    assert nodes[0].node_type == "pattern"
+    assert nodes[0].candidate_node_type == "trait"  # 默认 stub 沿用先验基调
 
 
-def test_diary_maps_to_value_trait_belief():
+def test_diary_maps_to_pattern_with_value_candidate():
     eng = InternalizingEngine(StubElevationLLM())
     nodes = eng.consume(_inp(event_type="diary:night", content="我重视自由"))
-    assert nodes[0].node_type in ("value", "trait", "belief")
-    assert nodes[0].node_type == "value"
+    assert nodes[0].node_type == "pattern"
+    assert nodes[0].candidate_node_type in ("value", "trait", "belief")
+    assert nodes[0].candidate_node_type == "value"
 
 
 def test_conversation_by_category():
@@ -51,7 +59,8 @@ def test_conversation_by_category():
             provenance={"llm_judge": {"category": "preference_plan_event_fact"}},
         )
     )[0]
-    assert pref.node_type == "belief"
+    assert pref.node_type == "pattern"
+    assert pref.candidate_node_type == "belief"
 
     milestone = eng.consume(
         _inp(
@@ -60,25 +69,27 @@ def test_conversation_by_category():
             provenance={"llm_judge": {"category": "milestone"}},
         )
     )[0]
-    assert milestone.node_type == "value"
+    assert milestone.node_type == "pattern"
+    assert milestone.candidate_node_type == "value"
 
 
-# —— LLM 后验覆盖先验 ——
+# —— LLM 后验覆盖先验（作为候选解释，不直接成为灵魂结构）——
 
 
-def test_llm_posterior_overrides_prior():
-    # 新闻先验 = belief，但 LLM 依 content 后验判为 value。
+def test_llm_posterior_overrides_prior_as_candidate():
+    # 新闻先验 = belief，但 LLM 依 content 后验判为 value → 候选维度 = value。
     llm = StubElevationLLM(keyword_map={"自由": "value"})
     eng = InternalizingEngine(llm)
     nodes = eng.consume(_inp(event_type="world:news_event", content="新闻里我感悟到自由"))
-    assert nodes[0].node_type == "value"
+    assert nodes[0].node_type == "pattern"
+    assert nodes[0].candidate_node_type == "value"
 
 
 def test_invalid_llm_node_type_raises():
     class _BadLLM:
         def classify(self, content, provenance, prior_node_type):
             from soul_elevation.llm import Classification
-            return Classification("memory", content, 0.5)  # memory 不是合法维度
+            return Classification("memory", content, 0.5)  # memory 不是合法候选维度
 
     eng = InternalizingEngine(_BadLLM())
     with pytest.raises(ValueError):

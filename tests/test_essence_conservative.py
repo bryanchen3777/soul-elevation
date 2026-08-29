@@ -1,7 +1,7 @@
-"""essence 保守边界（MEMORY-LIFECYCLE §3.2）单元测试。
+"""essence 保守边界（MEMORY-LIFECYCLE §3.2 + Consolidation ≠ Elevation）单元测试。
 
 覆盖三处实现缺口：
-1. essence 不再由单一事件直接产生（prior 表移除 essence）。
+1. essence 不再由单一事件直接产生（prior 表移除 essence；单一事件只产 pattern 候选）。
 2. essence 豁免 forget/decay（不淡化、不抽象掉）。
 3. essence 修订门槛更高（默认只 reinforce，仅高门槛才改写）。
 """
@@ -34,7 +34,10 @@ def _essence_engine(confidence=0.3):
 
 
 def _essence_node(eng, valence="positive"):
-    return eng.consume(_inp(content="我温柔而疏离", provenance={"valence": valence}))[0]
+    """两次一致事件 → 2 个 pattern（candidate=essence）→ elevate 出 essence。"""
+    p1 = eng.consume(_inp(content="我温柔而疏离", provenance={"valence": valence}))[0]
+    eng.consume(_inp(content="我温柔而疏离", provenance={"valence": valence}))[0]
+    return eng.elevate(p1.node_id)
 
 
 # —— 缺口 1：essence 不再由单一事件直接产生 ——
@@ -51,19 +54,21 @@ def test_essence_absent_from_prior_tuples():
         assert "essence" not in prior
 
 
-def test_single_calendar_event_produces_trait_not_essence():
+def test_single_calendar_event_produces_pattern_not_essence():
     eng = InternalizingEngine(StubElevationLLM())
     node = eng.consume(_inp(event_type="world:calendar_event", content="今天去爬山"))[0]
-    assert node.node_type == "trait"
+    assert node.node_type == "pattern"  # 单一事件只产候选 pattern
+    assert node.candidate_node_type == "trait"
 
 
-def test_single_dream_produces_trait_not_essence():
+def test_single_dream_produces_pattern_not_essence():
     eng = InternalizingEngine(StubElevationLLM())
     node = eng.consume(_inp(event_type="dream:dream", content="梦见一片海"))[0]
-    assert node.node_type == "trait"
+    assert node.node_type == "pattern"
+    assert node.candidate_node_type == "trait"
 
 
-def test_milestone_produces_value_not_essence():
+def test_milestone_produces_pattern_not_essence():
     assert resolve_prior(
         "conversation:user_message", {"llm_judge": {"category": "milestone"}}
     ) == ("value",)
@@ -75,7 +80,18 @@ def test_milestone_produces_value_not_essence():
             provenance={"llm_judge": {"category": "milestone"}},
         )
     )[0]
-    assert node.node_type == "value"
+    assert node.node_type == "pattern"
+    assert node.candidate_node_type == "value"
+
+
+def test_single_essence_candidate_pattern_does_not_elevate():
+    # LLM 后验判 essence 也只是候选：单一 pattern 证据不足，elevate 拒绝。
+    eng = _essence_engine()
+    p = eng.consume(_inp(content="我温柔而疏离"))[0]
+    assert p.node_type == "pattern"
+    assert p.candidate_node_type == "essence"
+    with pytest.raises(ValueError):
+        eng.elevate(p.node_id)  # 1 条证据 < 阈值 2
 
 
 # —— 缺口 2：essence 豁免 forget/decay ——
@@ -100,7 +116,7 @@ def test_forget_essence_raises():
 
 
 def test_forget_mixed_with_essence_raises_without_partial_fade():
-    eng = _essence_engine()  # 带 keyword_map，可产 essence
+    eng = _essence_engine()  # 带 keyword_map，可产 essence 候选
     belief = eng.consume(_inp(event_type="world:news_event", content="世界很危险"))[0]
     essence = _essence_node(eng)  # 同一引擎内再产一个 essence
     with pytest.raises(ValueError):
@@ -120,7 +136,7 @@ def test_essence_revise_default_reinforces_only():
     # 只 reinforce：不换 node_id、不改 lineage、不产生新因果节点。
     assert reinforced.node_id == essence.node_id
     assert reinforced.lineage_path == essence.lineage_path
-    assert reinforced.parent_node_id is None
+    assert reinforced.parent_node_id == essence.parent_node_id  # lineage 不变
     assert reinforced.confidence > essence.confidence
     assert reinforced.stability > essence.stability
     # 注册表里仍是同一个节点（原地替换，无新节点）。
@@ -153,10 +169,12 @@ def test_essence_revise_partial_threshold_reinforces():
     assert reinforced.confidence > essence.confidence
 
 
-def test_belief_revise_unaffected_by_essence_threshold():
-    # 非 essence 节点不受高门槛约束，仍走普通 reconsolidation 改写。
+def test_pattern_revise_unaffected_by_essence_threshold():
+    # 非 essence 节点不受高门槛约束，仍走普通 reconsolidation 改写；
+    # 修订 pattern 产出仍是候选 pattern（Consolidation ≠ Elevation）。
     eng = InternalizingEngine(StubElevationLLM())
-    belief = eng.consume(_inp(event_type="world:news_event", content="世界很危险"))[0]
-    new = eng.revise(belief.node_id, "世界没那么危险")
-    assert new.node_id != belief.node_id
-    assert new.parent_node_id == belief.node_id
+    pattern = eng.consume(_inp(event_type="world:news_event", content="世界很危险"))[0]
+    new = eng.revise(pattern.node_id, "世界没那么危险")
+    assert new.node_id != pattern.node_id
+    assert new.parent_node_id == pattern.node_id
+    assert new.node_type == "pattern"

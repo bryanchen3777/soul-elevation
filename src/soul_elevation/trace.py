@@ -24,7 +24,13 @@ DEFAULT_TRACE_PATH = "data/elevation/elevation_trace.jsonl"
 
 # 事件类型词汇表（frozen，作为运行时校验依据）。
 EVENT_TYPES: frozenset = frozenset(
-    {"node_created", "node_revised", "edge_decayed", "node_forgotten"}
+    {
+        "node_created",
+        "node_elevated",  # pattern → 灵魂结构升华（Consolidation ≠ Elevation）
+        "node_revised",
+        "edge_decayed",
+        "node_forgotten",
+    }
 )
 
 _LOGGER = logging.getLogger("soul_elevation.trace")

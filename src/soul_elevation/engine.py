@@ -1,8 +1,14 @@
-"""soul_elevation 引擎：抽象接口 + 第二阶段「内化映射」+ 第三阶段「reconsolidation 修订 / 升华式遗忘」+ 第四阶段「可审计闭环」。
+"""soul_elevation 引擎：抽象接口 + 第二阶段「内化映射」+ Pattern 中间层（Consolidation ≠ Elevation）+ 第三阶段「reconsolidation 修订 / 升华式遗忘」+ 第四阶段「可审计闭环」。
 
 第一阶段定义抽象接口 ``ElevationEngine``（``consume`` 签名定死）。
 第二阶段在其上实现 ``InternalizingEngine``：先验映射（prior）→ LLM 后验（posterior）
 → 产出 ``ElevationNode`` + 对应 ``EvidenceEdge``。
+
+**Consolidation ≠ Elevation 边界（Pattern 中间层）**：``consume`` 对单一事件只产
+``pattern`` 节点（候选，consolidation 输出），LLM 后验结果作为 ``candidate_node_type``
+候选解释（interpretation，非 truth）；证据累积达阈值后由 ``elevate`` 升华成
+belief/value/trait/essence（灵魂结构）。单一事件不直接产生灵魂结构。
+
 第三阶段新增三个节点生命周期方法：
 
 - ``revise``：reconsolidation 式信念修订（检索激活→重估→改写 N'→留痕），
@@ -13,8 +19,8 @@
 
 第四阶段：注入 ``ElevationTraceWriter``（可选）时，上述生命周期动作各自向
 **自有** ``elevation_trace.jsonl`` 追加审计事件（``node_created`` /
-``node_revised`` / ``edge_decayed`` / ``node_forgotten``）。trace 写失败只告警、
-不阻断主路径（失败隔离）。
+``node_elevated`` / ``node_revised`` / ``edge_decayed`` / ``node_forgotten``）。
+trace 写失败只告警、不阻断主路径（失败隔离）。
 
 零 Soul OS 依赖：Soul OS 通过 adapter 把 InnerLifeEvent + Memory 映射成
 ``ElevationInput`` 后喂进来，本模块不感知上游任何类型。
@@ -30,6 +36,7 @@ from typing import Dict, List, Mapping, Optional, Sequence
 
 from .llm import ElevationLLM
 from .models import (
+    SOUL_NODE_TYPES,
     VALID_NODE_TYPES,
     VALID_VALENCES,
     ElevationInput,
@@ -47,6 +54,11 @@ DEFAULT_AGENT_ID = "default"
 DEFAULT_DECAY_RATE = 0.5
 DEFAULT_CONFIDENCE_BOOST = 0.2
 DEFAULT_STABILITY_BOOST = 0.3
+
+# —— Consolidation ≠ Elevation 边界（Pattern 中间层）——
+# 单一事件 → pattern（候选，consolidation 输出）；证据累积达阈值后才 elevate 成
+# 灵魂结构（belief/value/trait/essence）。默认阈值 N=2，可配。
+DEFAULT_ELEVATE_MIN_EVIDENCE = 2
 
 # —— essence 保守边界（MEMORY-LIFECYCLE §3.2）——
 # essence 修订高门槛：仅当 valence 反转 + ≥2 条新独立证据 + confidence delta 超阈值
@@ -95,20 +107,25 @@ class ElevationEngine(ABC):
 
     @abstractmethod
     def consume(self, input: ElevationInput) -> List[ElevationNode]:
-        """消费一条归一化输入，产出（可能的）升华节点列表。
+        """消费一条归一化输入，产出（可能的）pattern 候选节点列表。
 
         接口签名定死：``consume(input: ElevationInput) -> list[ElevationNode]``。
+        单一事件只产 ``pattern`` 节点（consolidation 输出，候选）；灵魂结构
+        （belief/value/trait/essence）须经 ``elevate`` 证据累积后升华。
         """
         raise NotImplementedError
 
 
 class InternalizingEngine(ElevationEngine):
-    """第二阶段：内化映射引擎 + 第三阶段：节点生命周期（修订 / 遗忘）。
+    """第二阶段：内化映射引擎 + Pattern 中间层 + 第三阶段：节点生命周期（修订 / 遗忘）。
 
-    消费一条 ``ElevationInput``：确定性先验映射 → 注入的 LLM 后验 → 产出
-    ``ElevationNode``；对应 ``EvidenceEdge`` 由本引擎持有（``evidence_edges``），
-    供上层审计回查。source_id 回指 input.source_id，双时序 valid_from_ts=now、
-    valid_until_ts=None。
+    消费一条 ``ElevationInput``：确定性先验映射 → 注入的 LLM 后验（候选解释）→
+    产出 ``pattern`` 节点（``candidate_node_type`` 承载 LLM 后验候选维度）；
+    对应 ``EvidenceEdge`` 由本引擎持有（``evidence_edges``），供上层审计回查。
+    source_id 回指 input.source_id，双时序 valid_from_ts=now、valid_until_ts=None。
+
+    **Consolidation ≠ Elevation**：``elevate`` 在证据累积达阈值后把 pattern 升华成
+    灵魂结构；pattern 保留（因果树 parent 关系 + 证据边 superseded 留痕）。
 
     第三阶段在此之上维护**节点注册表**（``nodes`` / ``get_node``）并新增：
 
@@ -184,19 +201,22 @@ class InternalizingEngine(ElevationEngine):
         prior = resolve_prior(input.event_type, input.provenance)
         prior_node_type = prior[0]  # 基调（primary prior）
 
-        # 2) LLM 后验（依 content / provenance 可覆盖先验）
+        # 2) LLM 后验 = **候选解释**（interpretation，非 truth）：依 content /
+        #    provenance 可覆盖先验，但结果只作为 pattern 的候选维度，不直接成为
+        #    灵魂结构（Consolidation ≠ Elevation 边界）。
         classification = self._llm.classify(input.content, input.provenance, prior_node_type)
-        node_type = classification.node_type
+        candidate_node_type = classification.node_type
         content = classification.content
         confidence = classification.confidence
 
-        if node_type not in VALID_NODE_TYPES:
+        if candidate_node_type not in SOUL_NODE_TYPES:
             raise ValueError(
-                f"LLM returned invalid node_type {node_type!r}; "
-                f"expected one of {sorted(VALID_NODE_TYPES)}"
+                f"LLM returned invalid candidate node_type {candidate_node_type!r}; "
+                f"expected one of {sorted(SOUL_NODE_TYPES)}"
             )
 
-        # 3) 产出 node + edge（双时序：valid_from_ts=now，valid_until_ts=None）
+        # 3) 产出 pattern 节点（consolidation 输出，候选）+ edge
+        #    （双时序：valid_from_ts=now，valid_until_ts=None）
         now = _utcnow_iso()
         node_id = new_id()
 
@@ -216,7 +236,8 @@ class InternalizingEngine(ElevationEngine):
 
         node = ElevationNode(
             node_id=node_id,
-            node_type=node_type,
+            node_type="pattern",  # 单一事件只产候选 pattern，不直接产灵魂结构
+            candidate_node_type=candidate_node_type,  # LLM 后验候选解释
             content=content,
             confidence=confidence,
             stability=self._default_stability,
@@ -260,6 +281,156 @@ class InternalizingEngine(ElevationEngine):
         )
 
         return [node]
+
+    # —— Consolidation ≠ Elevation：pattern → 灵魂结构升华 ——
+
+    def _active_edges(self, node_id: str) -> List[EvidenceEdge]:
+        """某节点仍有效（valid_until_ts is None）的证据边。"""
+        return [e for e in self._edges if e.node_id == node_id and e.valid_until_ts is None]
+
+    def elevate(
+        self,
+        pattern_node_id: str,
+        *,
+        node_type: Optional[NodeType] = None,
+        content: Optional[str] = None,
+        confidence: Optional[float] = None,
+        valence: Optional[Valence] = None,
+        min_evidence: int = DEFAULT_ELEVATE_MIN_EVIDENCE,
+        source_ids: Optional[Sequence[str]] = None,
+        source_type: SourceType = "inner_life_event",
+        inner_life_event_id: Optional[str] = None,
+        trigger_type: str = "elevation",
+    ) -> ElevationNode:
+        """把 pattern 升华成灵魂结构（belief/value/trait/essence）。
+
+        **Consolidation ≠ Elevation 边界**：单一事件只产 pattern（候选）；证据累积
+        达阈值（默认 ``min_evidence=2``，可配）后，``elevate`` 才把 pattern 升华成
+        灵魂结构。升华维度默认取 pattern 的 LLM 后验候选（``candidate_node_type``，
+        interpretation），也可显式传入 ``node_type``（如由 prior 表决定）。
+
+        - **证据累积**：聚合所有与目标 pattern 同候选维度（``candidate_node_type``
+          相同）的 pattern 的**有效证据边**（``valid_until_ts is None``）；总数
+          < ``min_evidence`` 时抛 ``ValueError``（证据不足，不升华）。
+        - **pattern 保留**：升华后 pattern 节点仍在注册表；灵魂节点以
+          ``parent_node_id=pattern`` 挂到因果树（改写不覆盖），pattern 的有效证据边
+          标记 ``valid_until_ts=now``（superseded 留痕），灵魂节点新建证据边回指
+          同一批 ``source_id``（原文仍可回查）。
+        - **LLM = interpretation**：LLM 后验只决定候选维度/内容/置信度，是否成为
+          灵魂事实由「证据累积 + 阈值」决定，不由单次 LLM 输出直接决定。
+        """
+        pattern = self.get_node(pattern_node_id)
+        if pattern.node_type != "pattern":
+            raise ValueError(
+                f"elevate requires a pattern node, got node_type {pattern.node_type!r}"
+            )
+        if not isinstance(min_evidence, int) or min_evidence < 1:
+            raise ValueError(f"min_evidence must be a positive int, got {min_evidence!r}")
+
+        # 证据累积：同候选维度的 pattern 组（candidate 为 None 时只算目标自身）。
+        candidate = pattern.candidate_node_type
+        group = [
+            n
+            for n in self._nodes.values()
+            if n.node_type == "pattern" and n.candidate_node_type == candidate
+        ]
+        active_edges: List[EvidenceEdge] = []
+        for n in group:
+            active_edges.extend(self._active_edges(n.node_id))
+        if len(active_edges) < min_evidence:
+            raise ValueError(
+                f"insufficient evidence to elevate: {len(active_edges)} < {min_evidence}"
+            )
+
+        # 升华维度：显式 node_type（prior 表决定）或 LLM 后验候选（interpretation）。
+        resolved_type = node_type or candidate
+        if resolved_type not in SOUL_NODE_TYPES:
+            raise ValueError(
+                f"invalid elevated node_type {resolved_type!r}; "
+                f"expected one of {sorted(SOUL_NODE_TYPES)}"
+            )
+        resolved_content = content if content is not None else pattern.content
+        resolved_confidence = (
+            confidence if confidence is not None else pattern.confidence
+        )
+        resolved_valence = valence if valence is not None else pattern.valence
+        if resolved_valence not in VALID_VALENCES:
+            raise ValueError(
+                f"invalid valence {resolved_valence!r}; expected one of {sorted(VALID_VALENCES)}"
+            )
+
+        now = _utcnow_iso()
+        soul_node_id = new_id()
+        soul_node = ElevationNode(
+            node_id=soul_node_id,
+            node_type=resolved_type,
+            content=resolved_content,
+            confidence=resolved_confidence,
+            stability=_bump(pattern.stability, DEFAULT_STABILITY_BOOST),  # 证据累积 → 更稳定
+            valence=resolved_valence,
+            agent_id=pattern.agent_id,
+            parent_node_id=pattern.node_id,  # 因果树 parent 关系，pattern 保留
+            lineage_depth=pattern.lineage_depth + 1,
+            lineage_path=f"{pattern.lineage_path}/{soul_node_id}",
+            created_ts=now,
+            provenance_ref=inner_life_event_id or pattern.provenance_ref,
+        )
+        self._nodes[soul_node_id] = soul_node
+
+        # 留痕：被聚合 pattern 的有效证据边 superseded（不删 source_id）。
+        for n in group:
+            self._supersede_edges(n.node_id, now)
+
+        # 灵魂节点证据边：回指被聚合 pattern 的 source_id（原文可回查）。
+        for edge in active_edges:
+            self._edges.append(
+                EvidenceEdge(
+                    edge_id=new_id(),
+                    node_id=soul_node_id,
+                    source_type=edge.source_type,
+                    source_id=edge.source_id,
+                    agent_id=soul_node.agent_id,
+                    weight=edge.weight,
+                    valid_from_ts=now,
+                    valid_until_ts=None,
+                    inner_life_event_id=inner_life_event_id or edge.inner_life_event_id,
+                    trigger_type=edge.trigger_type,
+                )
+            )
+        # 额外新证据源（可选，如调用方补交的独立证据）。
+        for sid in source_ids or ():
+            self._edges.append(
+                EvidenceEdge(
+                    edge_id=new_id(),
+                    node_id=soul_node_id,
+                    source_type=source_type,
+                    source_id=sid,
+                    agent_id=soul_node.agent_id,
+                    weight=1.0,
+                    valid_from_ts=now,
+                    valid_until_ts=None,
+                    inner_life_event_id=inner_life_event_id,
+                    trigger_type=trigger_type,
+                )
+            )
+
+        self._emit(
+            "node_elevated",
+            soul_node.node_id,
+            ts=now,
+            parent_node_id=pattern.node_id,
+            source_id=None,
+            provenance_ref=soul_node.provenance_ref,
+            node_type=soul_node.node_type,
+            lineage_depth=soul_node.lineage_depth,
+            lineage_path=soul_node.lineage_path,
+            confidence_after=soul_node.confidence,
+            evidence_source_ids=[e.source_id for e in active_edges],
+            pattern_node_ids=[n.node_id for n in group],
+            reason="evidence_threshold_met",
+        )
+
+        return soul_node
 
     # —— 第三阶段：reconsolidation 式信念修订 ——
 
@@ -366,19 +537,24 @@ class InternalizingEngine(ElevationEngine):
             return reinforced
 
         # 重估：旧节点上下文经 provenance 注入，供 LLM 做新旧对比。
+        # 先验基调取旧节点的**候选维度**（pattern 的 candidate_node_type 或灵魂结构
+        # 自身的 node_type），保证 LLM 后验落在灵魂维度上（Consolidation ≠ Elevation）。
         merged: Dict[str, object] = dict(provenance or {})
         merged.setdefault("old_node_id", old.node_id)
         merged.setdefault("old_content", old.content)
         merged.setdefault("old_confidence", old.confidence)
-        classification = self._llm.classify(new_content, merged, old.node_type)
-        node_type = classification.node_type
+        prior_for_llm = (
+            old.candidate_node_type if old.node_type == "pattern" else old.node_type
+        )
+        classification = self._llm.classify(new_content, merged, prior_for_llm)
+        candidate_node_type = classification.node_type
         content = classification.content
         confidence = new_confidence if new_confidence is not None else classification.confidence
 
-        if node_type not in VALID_NODE_TYPES:
+        if candidate_node_type not in SOUL_NODE_TYPES:
             raise ValueError(
-                f"LLM returned invalid node_type {node_type!r}; "
-                f"expected one of {sorted(VALID_NODE_TYPES)}"
+                f"LLM returned invalid candidate node_type {candidate_node_type!r}; "
+                f"expected one of {sorted(SOUL_NODE_TYPES)}"
             )
         resolved_valence = old.valence if valence is None else valence
         if resolved_valence not in VALID_VALENCES:
@@ -389,9 +565,13 @@ class InternalizingEngine(ElevationEngine):
 
         now = _utcnow_iso()
         new_node_id = new_id()
+        # Consolidation ≠ Elevation：修订 pattern 产出仍是候选 pattern（candidate 更新）；
+        # 修订既有灵魂结构（belief/value/trait/essence）才产出同层灵魂结构（reconsolidation）。
+        is_pattern = old.node_type == "pattern"
         new_node = ElevationNode(
             node_id=new_node_id,
-            node_type=node_type,
+            node_type="pattern" if is_pattern else candidate_node_type,
+            candidate_node_type=candidate_node_type if is_pattern else None,
             content=content,
             confidence=confidence,
             stability=_bump(old.stability, DEFAULT_STABILITY_BOOST),  # 被想起 → 强化

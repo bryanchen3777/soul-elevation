@@ -9,19 +9,39 @@
 ## 设计（简述）
 
 - 升华层是**只读消费**层：读上游 `InnerLifeEvent` / `Memory` / SAGE `Fact`，写自有 store；不改任何 frozen contract。
-- 数据模型**自研**：带完整证据链 + 置信度 + 版本因果树的信念/价值/性格/内涵节点。
+- 数据模型**自研**：带完整证据链 + 置信度 + 版本因果树的信念/价值/性格/内涵节点 + **Pattern 中间层**。
 - 三个核心机制自研（证据链节点 / reconsolidation 修订 / 升华式遗忘），四个机制采用现成（CLS 双系统、SAGE 强化原则、时序有效区间、sidecar 审计）。
+
+## Consolidation ≠ Elevation 边界（Pattern 中间层）
+
+**原则原文**：
+
+> Memory preserves experience. Consolidation distills durable patterns. Elevation internalizes durable meaning into Soul structure. Higher abstraction = stronger evidence + slower change.
+
+**采纳原则**：
+
+1. **Consolidation ≠ Elevation**：记忆巩固（Consolidation）与灵魂升华（Elevation）是两件事，分开处理。
+2. **单一事件不直接产生灵魂结构**：essence 保守边界扩展到**所有** node type——单一事件只产 `pattern`（候选），不直接产 belief/value/trait/essence。
+3. **LLM = interpretation 不是 truth**：LLM 后验结果只是「候选解释」（`candidate_node_type`），不直接当灵魂事实；证据累积 + 阈值决定是否升华。
+4. **两个图分开**：lineage（因果树）vs evidence（证据边，`EvidenceEdge` 已做）。
+5. **不要过度工程**：不加 embedding / vector DB / graph DB / scoring framework / 新 persistence layer。
+
+**机制**：
+
+- `consume(input)`：单一事件 → 产 **`pattern` 节点**（consolidation 输出，候选）。LLM 后验的维度/内容/置信度作为 `candidate_node_type` / `content` / `confidence` 存在 pattern 上（interpretation，非 truth）。签名不变：`consume(input: ElevationInput) -> list[ElevationNode]`。
+- `elevate(pattern_node_id, ...)`：证据累积达阈值（默认 `min_evidence=2`，可配）后，把 pattern 升华成 belief/value/trait/essence。升华维度默认取 LLM 后验候选，也可显式传入（如由 prior 表决定）。升华后 **pattern 保留**（灵魂节点以 `parent_node_id=pattern` 挂因果树；pattern 的有效证据边标记 `valid_until_ts` superseded 留痕，灵魂节点新建证据边回指同一批 `source_id`）。
+- 证据不足（< 阈值）时 `elevate` 抛 `ValueError`——LLM 说「这是信念」不算数，证据说了算。
 
 ## 数据模型（第一阶段）
 
-### `ElevationNode` — 信念/价值/性格/内涵节点
+### `ElevationNode` — 信念/价值/性格/内涵/模式节点
 
-四类节点统一 schema。**关键保真约束**：节点**不存证据正文**，只带证据边索引——证据正文永远留在证据边指向的 `Memory` / `Fact` / `Event` 里。
+五类节点统一 schema（`pattern` 是第 5 类：consolidation 输出，**非灵魂结构**）。**关键保真约束**：节点**不存证据正文**，只带证据边索引——证据正文永远留在证据边指向的 `Memory` / `Fact` / `Event` 里。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `node_id` | `str` | 32-hex（独立命名空间） |
-| `node_type` | `belief/value/trait/essence` | 四类节点统一 schema |
+| `node_type` | `belief/value/trait/essence/pattern` | 五类节点统一 schema |
 | `content` | `str` | 自然语言命题 |
 | `confidence` | `float` | 0.0–1.0，证据链聚合 |
 | `stability` | `float` | 0.0–1.0，reconsolidation 次数 + 一致证据数 |
@@ -32,6 +52,7 @@
 | `lineage_path` | `str` | 反范式化路径 |
 | `created_ts` | `str` | ISO 8601 UTC |
 | `provenance_ref` | `Optional[str]` | 触发节点的上游事件 id |
+| `candidate_node_type` | `Optional[belief/value/trait/essence]` | 仅 pattern 节点：LLM 后验候选维度（interpretation，非 truth） |
 
 ### `EvidenceEdge` — 证据边
 
@@ -72,7 +93,7 @@ class ElevationEngine(ABC):
         ...
 ```
 
-`consume(input: ElevationInput) -> list[ElevationNode]` —— **接口签名已定死**。第一阶段只定义接口 + 数据模型；`consume` 的完整升华逻辑（活动→灵魂维度内化映射、reconsolidation 式信念修订、升华式遗忘、可审计闭环）留后续阶段。
+`consume(input: ElevationInput) -> list[ElevationNode]` —— **接口签名已定死**。单一事件只产 `pattern` 候选节点（consolidation 输出）；灵魂结构（belief/value/trait/essence）须经 `elevate(pattern_node_id, ...)` 证据累积达阈值后升华（Consolidation ≠ Elevation 边界）。完整升华逻辑（活动→灵魂维度内化映射、reconsolidation 式信念修订、升华式遗忘、可审计闭环）见各阶段实现。
 
 ## 零 Soul OS 依赖
 

@@ -116,10 +116,11 @@ def test_forget_semantic_edges_point_back_to_sources():
 
 def test_forget_defaults_node_type_to_most_common():
     eng = _engine()
-    n1 = eng.consume(_inp(event_type="world:news_event", content="世界很危险"))[0]  # belief
-    n2 = eng.consume(_inp(event_type="world:news_event", content="世界很复杂"))[0]  # belief
+    n1 = eng.consume(_inp(event_type="world:news_event", content="世界很危险"))[0]  # pattern
+    n2 = eng.consume(_inp(event_type="world:news_event", content="世界很复杂"))[0]  # pattern
     sem = eng.forget([n1.node_id, n2.node_id], "抽象")
-    assert sem.node_type == "belief"
+    # consume 产 pattern 候选 → 语义核心聚合默认也是 pattern（Consolidation ≠ Elevation）。
+    assert sem.node_type == "pattern"
 
 
 def test_forget_requires_nonempty():
