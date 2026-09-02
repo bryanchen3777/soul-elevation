@@ -54,6 +54,27 @@ CATEGORY_TRIGGER_TYPES: frozenset = frozenset({"conversation:user_message", "mem
 # 未知 trigger_type / 未知 category 的保守回退（可扩展性：不崩溃，落入最通用的信念维度）。
 DEFAULT_PRIOR: Prior = _PRIOR_BELIEF
 
+# —— SE-5 Lifecycle 阈值表（v1 两层：essence 锁死 vs 其他共用一条中等门槛曲线）——
+# 设计文档 ELEVATION-LIFECYCLE §7.1 建议默认值，以参数化常量落地（可调、可测）。
+# 其他层（belief/value/trait）共用一条中等门槛曲线，不做四层独立衰减。
+#
+# 衰减锚点（§8，复用 M5.13 _decay_locked 语义）：last_support_ts 优先，
+# created_ts + grace 兜底；old ≠ outdated——年龄不是退场理由，失去支持才是。
+LIFECYCLE_T_WEAKEN_DAYS = 7          # 无新支持证据 ≥ 7 模拟天 → WEAKENING
+LIFECYCLE_T_DORMANT_DAYS = 30        # 无新支持证据 ≥ 30 模拟天 → DORMANT（从锚点起算）
+LIFECYCLE_GRACE_DAYS = 3             # 无支持证据历史的节点：created_ts + grace 兜底（grace 期内不衰减）
+# SUPERSEDE 门槛：矛盾**独立**证据数（SE-1 evidence_key 判定）≥ N_supersede，
+# 且跨时间一致（矛盾证据分布在 ≥ 2 个不同模拟日，防单日噪声）。
+LIFECYCLE_N_SUPERSEDE = 3            # 其他层：3（> elevate 的 2，体现 durable 惯性）
+LIFECYCLE_SUPERSEDE_MIN_DAYS_SPREAD = 2  # 跨时间一致：≥ 2 个不同模拟日
+# essence 锁死层：SUPERSEDE 门槛全系统最高（valence 反转 + 高独立证据数 +
+# confidence delta + 跨时间一致，多条件同时满足才允许）。
+LIFECYCLE_ESSENCE_N_SUPERSEDE = 5    # essence 矛盾独立证据门槛（最高）
+LIFECYCLE_ESSENCE_CONFIDENCE_DELTA = 0.3  # 延续 ESSENCE_REVISE_CONFIDENCE_DELTA
+# essence reconsideration-candidate 通道（§7.2）：即使未达 SUPERSEDE 门槛，
+# 新证据长期累积达此数 → 标记 reconsideration_candidate（待复核，非自动改写）。
+LIFECYCLE_ESSENCE_RECONSIDERATION_MIN_EVIDENCE = 3
+
 
 def _category_from_provenance(provenance: Mapping[str, Any]) -> Optional[str]:
     """从 provenance 提取 llm_judge.category（兼容嵌套与扁平两种承载方式）。"""

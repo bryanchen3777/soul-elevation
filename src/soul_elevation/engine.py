@@ -50,7 +50,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import Counter
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Mapping, Optional, Sequence
 
 from .llm import ElevationLLM
@@ -58,15 +58,27 @@ from .models import (
     SOUL_NODE_TYPES,
     VALID_NODE_TYPES,
     VALID_VALENCES,
+    ContradictionRecord,
     ElevationInput,
     ElevationNode,
     EvidenceEdge,
+    LifecycleState,
     NodeType,
     SourceType,
     Valence,
     new_id,
 )
-from .prior import resolve_prior
+from .prior import (
+    LIFECYCLE_ESSENCE_CONFIDENCE_DELTA,
+    LIFECYCLE_ESSENCE_N_SUPERSEDE,
+    LIFECYCLE_ESSENCE_RECONSIDERATION_MIN_EVIDENCE,
+    LIFECYCLE_GRACE_DAYS,
+    LIFECYCLE_N_SUPERSEDE,
+    LIFECYCLE_SUPERSEDE_MIN_DAYS_SPREAD,
+    LIFECYCLE_T_DORMANT_DAYS,
+    LIFECYCLE_T_WEAKEN_DAYS,
+    resolve_prior,
+)
 from .trace import ElevationTraceWriter, build_event
 
 DEFAULT_AGENT_ID = "default"
@@ -159,6 +171,59 @@ def _count_independent_evidence(edges: Sequence[EvidenceEdge]) -> int:
             seen_events.add(e.inner_life_event_id)
         count += 1
     return count
+
+
+# —— SE-5 Lifecycle 辅助（deterministic，无 LLM）——
+
+def _parse_ts(ts: str) -> Optional[datetime]:
+    """解析 ISO 8601 时间戳；坏 timestamp 返回 None（legacy，no crash，deterministic）。"""
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _days_between(anchor_ts: str, now_ts: str) -> Optional[float]:
+    """两个 ISO 时间戳之间的天数（anchor → now）；坏 ts 返回 None（跳过，不衰减）。"""
+    anchor = _parse_ts(anchor_ts)
+    now = _parse_ts(now_ts)
+    if anchor is None or now is None:
+        return None
+    return (now - anchor).total_seconds() / 86400.0
+
+
+def _count_independent_contradictions(
+    records: Sequence[ContradictionRecord],
+) -> int:
+    """数**独立**矛盾证据（SE-1 evidence_key 语义：同一 source_id 或同一 event
+    identity → 计 1）。矛盾压力累积器去重后，独立数才是 SUPERSEDE 判定的依据。"""
+    seen_sources: set = set()
+    seen_events: set = set()
+    count = 0
+    for r in records:
+        if r.source_id in seen_sources:
+            continue
+        if r.event_identity is not None and r.event_identity in seen_events:
+            continue
+        seen_sources.add(r.source_id)
+        if r.event_identity is not None:
+            seen_events.add(r.event_identity)
+        count += 1
+    return count
+
+
+def _contradiction_spread_days(records: Sequence[ContradictionRecord]) -> int:
+    """矛盾证据跨时间一致判定：分布在多少个**不同模拟日**（date 部分）。
+
+    坏 ts 的记录不计入（不贡献跨时间一致性）。≥ ``LIFECYCLE_SUPERSEDE_MIN_DAYS_SPREAD``
+    才算跨时间一致（防单日噪声：同一天连打多条矛盾证据不算独立观察）。
+    """
+    days: set = set()
+    for r in records:
+        parsed = _parse_ts(r.ts)
+        if parsed is not None:
+            days.add(parsed.date().isoformat())
+    return len(days)
 
 
 class ElevationEngine(ABC):
@@ -338,6 +403,7 @@ class InternalizingEngine(ElevationEngine):
             lineage_path=node_id,
             created_ts=now,
             provenance_ref=canonical_event_id,
+            last_support_ts=now,  # SE-5：创建即有支持证据（decay 锚点）
         )
 
         edge = EvidenceEdge(
@@ -472,6 +538,7 @@ class InternalizingEngine(ElevationEngine):
             lineage_path=f"{pattern.lineage_path}/{soul_node_id}",
             created_ts=now,
             provenance_ref=inner_life_event_id or pattern.provenance_ref,
+            last_support_ts=now,  # SE-5：升华即有支持证据（decay 锚点）
         )
         self._nodes[soul_node_id] = soul_node
 
@@ -682,6 +749,7 @@ class InternalizingEngine(ElevationEngine):
             lineage_path=f"{old.lineage_path}/{new_node_id}",
             created_ts=now,
             provenance_ref=inner_life_event_id,
+            last_support_ts=now,  # SE-5：修订即有新支持证据（decay 锚点）
         )
         self._nodes[new_node_id] = new_node
 
@@ -867,6 +935,7 @@ class InternalizingEngine(ElevationEngine):
             lineage_path=new_node_id,
             created_ts=now,
             provenance_ref=inner_life_event_id,
+            last_support_ts=now,  # SE-5：语义核心聚合即有支持证据（decay 锚点）
         )
         self._nodes[new_node_id] = semantic_node
 
@@ -909,3 +978,400 @@ class InternalizingEngine(ElevationEngine):
 
         self.check_invariants()  # SE-3：变更后锁两图职责
         return semantic_node
+
+    # —— SE-5：Durable Soul Structure Lifecycle（四态状态机，不是动作）——
+    #
+    # 状态机：ACTIVE → WEAKENING → DORMANT → SUPERSEDED；两转换 REINFORCE /
+    # SUPERSEDE + 默认「证据不足什么都不做」。逻辑留在本引擎内（不建独立引擎）。
+    # 三条铁律：① Contradiction ≠ Revision（压力 vs 改变）；② Forgetting =
+    # lifecycle transition（节点永不物理删除）；③ essence 锁死（豁免自动衰减，
+    # SUPERSEDE 门槛全系统最高，唯一通道是 reconsideration candidate）。
+
+    def record_contradiction(
+        self,
+        node_id: str,
+        *,
+        source_id: str,
+        ts: Optional[str] = None,
+        event_identity: Optional[str] = None,
+        provenance_ref: Optional[str] = None,
+    ) -> ElevationNode:
+        """矛盾证据写入压力累积器（Contradiction ≠ Revision，§4）。
+
+        只累积**来源引用 + 时间**（``contradiction_pressure``），**不改变任何状态**
+        ——一次反例不推翻 durable structure；达 SUPERSEDE 阈值才允许结构改变。
+        同一 ``(source_id, event_identity)`` 只记一次（幂等去重）。
+
+        **essence reconsideration-candidate 通道（§7.2）**：essence 节点矛盾独立
+        证据累积达 ``LIFECYCLE_ESSENCE_RECONSIDERATION_MIN_EVIDENCE`` → 标记
+        ``reconsideration_candidate = true``（进入**待复核**而非自动改写；复核通过
+        才走 SUPERSEDE），并写 trace ``essence_reconsideration_candidate``。
+        """
+        node = self.get_node(node_id)
+        now = ts or _utcnow_iso()
+        record = ContradictionRecord(
+            source_id=source_id,
+            ts=now,
+            event_identity=event_identity,
+            provenance_ref=provenance_ref,
+        )
+        for r in node.contradiction_pressure:
+            if r.source_id == source_id and r.event_identity == event_identity:
+                return node  # 已记录，幂等（不重复累积）
+        updated = replace(node, contradiction_pressure=node.contradiction_pressure + (record,))
+        self._nodes[node_id] = updated
+
+        if node.node_type == "essence":
+            independent = _count_independent_contradictions(updated.contradiction_pressure)
+            if (
+                independent >= LIFECYCLE_ESSENCE_RECONSIDERATION_MIN_EVIDENCE
+                and not updated.reconsideration_candidate
+            ):
+                updated = replace(updated, reconsideration_candidate=True)
+                self._nodes[node_id] = updated
+                self._emit(
+                    "essence_reconsideration_candidate",
+                    updated.node_id,
+                    ts=now,
+                    parent_node_id=None,
+                    source_id=source_id,
+                    provenance_ref=provenance_ref,
+                    node_type=updated.node_type,
+                    contradiction_evidence_ids=[
+                        r.source_id for r in updated.contradiction_pressure
+                    ],
+                    reason="contradiction_pressure_accumulated",
+                )
+        return updated
+
+    def reinforce(
+        self,
+        node_id: str,
+        *,
+        source_id: Optional[str] = None,
+        source_ids: Optional[Sequence[str]] = None,
+        ts: Optional[str] = None,
+        source_type: SourceType = "inner_life_event",
+        inner_life_event_id: Optional[str] = None,
+        trigger_type: str = "reinforcement",
+    ) -> ElevationNode:
+        """REINFORCE 转换（§3.1）：新支持证据累积 → 强化 / 重新激活。
+
+        - ACTIVE → ACTIVE：原地提升 confidence/stability（复用 ``_reinforce`` 语义
+          ——不换 node_id、不改 lineage、不产生新因果节点）。
+        - WEAKENING → ACTIVE：重新激活（回到当前信念）。
+        - DORMANT → ACTIVE：重新激活（被想起、被重新支持）。
+        - SUPERSEDED：终态，拒绝（v1 不自动复活）。
+        - **不产生新节点**：REINFORCE 是强化，不是改写。
+        - 新支持证据边追加（``source_id`` / ``source_ids``），``last_support_ts``
+          更新为 now（decay 锚点刷新，old ≠ outdated）。
+        """
+        node = self.get_node(node_id)
+        if node.lifecycle_state == "superseded":
+            raise ValueError(
+                f"node {node_id!r} is SUPERSEDED (terminal); cannot reinforce"
+            )
+        now = ts or _utcnow_iso()
+
+        evidence_ids: List[str] = []
+        if source_id is not None:
+            evidence_ids.append(source_id)
+        if source_ids is not None:
+            evidence_ids.extend(source_ids)
+        for eid in evidence_ids:
+            self._edges.append(
+                EvidenceEdge(
+                    edge_id=new_id(),
+                    node_id=node.node_id,
+                    source_type=source_type,
+                    source_id=eid,
+                    agent_id=node.agent_id,
+                    weight=1.0,
+                    valid_from_ts=now,
+                    valid_until_ts=None,
+                    inner_life_event_id=inner_life_event_id,
+                    trigger_type=trigger_type,
+                )
+            )
+
+        state_before = node.lifecycle_state
+        reinforced = replace(
+            node,
+            confidence=_bump(node.confidence, DEFAULT_REINFORCE_CONFIDENCE_BOOST),
+            stability=_bump(node.stability, DEFAULT_REINFORCE_STABILITY_BOOST),
+            lifecycle_state="active",  # WEAKENING / DORMANT → ACTIVE；ACTIVE 保持
+            last_support_ts=now,
+        )
+        self._nodes[node.node_id] = reinforced
+
+        if state_before != "active":
+            self._emit(
+                "node_state_changed",
+                reinforced.node_id,
+                ts=now,
+                parent_node_id=None,
+                source_id=source_id,
+                provenance_ref=inner_life_event_id,
+                node_type=reinforced.node_type,
+                lifecycle_state_before=state_before,
+                lifecycle_state_after="active",
+                anchor_ts=now,
+                reason="reinforced_by_new_support_evidence",
+            )
+        self._emit(
+            "node_revised",
+            reinforced.node_id,
+            ts=now,
+            parent_node_id=None,
+            source_id=source_id,
+            provenance_ref=inner_life_event_id,
+            node_type=reinforced.node_type,
+            lineage_depth=reinforced.lineage_depth,
+            lineage_path=reinforced.lineage_path,
+            confidence_before=node.confidence,
+            confidence_after=reinforced.confidence,
+            evidence_source_ids=evidence_ids,
+            reason="reinforced_only",
+        )
+
+        self.check_invariants()  # SE-3：变更后锁两图职责
+        return reinforced
+
+    def supersede(
+        self,
+        node_id: str,
+        *,
+        new_content: str,
+        new_confidence: float,
+        valence: Valence,
+        source_ids: Sequence[str],
+        ts: Optional[str] = None,
+        source_type: SourceType = "inner_life_event",
+        inner_life_event_id: Optional[str] = None,
+        trigger_type: str = "supersession",
+    ) -> ElevationNode:
+        """SUPERSEDE 转换（§3.2）：矛盾独立证据达阈值 → 新节点取代旧节点。
+
+        **触发（§6/§7 门槛，未达 → 抛 ``ValueError``，默认「证据不足什么都不做」）**：
+        - 独立矛盾证据数 ≥ ``N_supersede``（其他层 3；essence 全系统最高 ≥5）；
+        - 跨时间一致：矛盾证据分布在 ≥ ``LIFECYCLE_SUPERSEDE_MIN_DAYS_SPREAD``
+          （2）个不同模拟日（防单日噪声）；
+        - essence 额外：valence 反转 **且** confidence delta 超阈值。
+
+        **效果**：
+        1. 新节点诞生：``node_type`` 与旧节点同层；``parent_node_id=旧节点``、
+           ``lineage_depth=旧+1``、``lineage_path=旧路径/新 id``（**完全复用既有
+           lineage 字段族**，不另创术语）。
+        2. 旧节点 → SUPERSEDED（冻结，**永久保留不删**；``superseded_by=新节点 id``）。
+        3. 证据留痕：旧节点仍有效支持证据边 ``valid_until_ts=now``；新节点证据边
+           回指同一批原始 ``source_id`` + 触发矛盾的新证据源（原文永远可回查）。
+        """
+        old = self.get_node(node_id)
+        if old.lifecycle_state == "superseded":
+            raise ValueError(
+                f"node {node_id!r} is already SUPERSEDED (terminal)"
+            )
+        now = ts or _utcnow_iso()
+
+        # 1) 本次触发矛盾的新证据源写入累积器（去重；跨时间一致由历史累积提供）。
+        for sid in source_ids:
+            self.record_contradiction(
+                node_id,
+                source_id=sid,
+                ts=now,
+                event_identity=None,
+                provenance_ref=inner_life_event_id,
+            )
+        current = self.get_node(node_id)
+
+        # 2) 门槛判定（deterministic，无 LLM）。
+        independent = _count_independent_contradictions(current.contradiction_pressure)
+        spread = _contradiction_spread_days(current.contradiction_pressure)
+        is_essence = old.node_type == "essence"
+        n_required = (
+            LIFECYCLE_ESSENCE_N_SUPERSEDE if is_essence else LIFECYCLE_N_SUPERSEDE
+        )
+        if independent < n_required:
+            raise ValueError(
+                f"insufficient independent contradiction evidence to supersede: "
+                f"{independent} < {n_required}"
+            )
+        if spread < LIFECYCLE_SUPERSEDE_MIN_DAYS_SPREAD:
+            raise ValueError(
+                f"contradiction evidence not spread across time: "
+                f"{spread} < {LIFECYCLE_SUPERSEDE_MIN_DAYS_SPREAD} distinct days"
+            )
+        if is_essence:
+            if not _valence_reversed(old.valence, valence):
+                raise ValueError("essence supersede requires valence reversal")
+            if (new_confidence - old.confidence) <= LIFECYCLE_ESSENCE_CONFIDENCE_DELTA:
+                raise ValueError(
+                    "essence supersede requires confidence delta above "
+                    f"{LIFECYCLE_ESSENCE_CONFIDENCE_DELTA}"
+                )
+
+        # 3) 新节点诞生（同层 node_type；lineage 复用既有字段族）。
+        new_node_id = new_id()
+        new_node = ElevationNode(
+            node_id=new_node_id,
+            node_type=old.node_type,  # belief→belief；value→value；…（同层）
+            content=new_content,
+            confidence=new_confidence,
+            stability=_bump(old.stability, DEFAULT_STABILITY_BOOST),
+            valence=valence,
+            agent_id=old.agent_id,
+            parent_node_id=old.node_id,  # 演化父指针（SUPERSEDE = lineage 的又一种演化边）
+            lineage_depth=old.lineage_depth + 1,
+            lineage_path=f"{old.lineage_path}/{new_node_id}",
+            created_ts=now,
+            provenance_ref=inner_life_event_id,
+            last_support_ts=now,
+        )
+        self._nodes[new_node_id] = new_node
+
+        # 4) 旧节点 → SUPERSEDED（冻结，永久保留不删；反向 lineage 指针）。
+        frozen = replace(
+            current,
+            lifecycle_state="superseded",
+            superseded_by=new_node_id,
+        )
+        self._nodes[old.node_id] = frozen
+
+        # 5) 证据留痕：旧节点仍有效支持证据边 valid_until_ts=now（不删 source_id）；
+        #    新节点证据边回指同一批原始 source_id + 触发矛盾的新证据源。
+        old_active = self._active_edges(old.node_id)
+        self._supersede_edges(old.node_id, now)
+        for edge in old_active:
+            self._edges.append(
+                EvidenceEdge(
+                    edge_id=new_id(),
+                    node_id=new_node_id,
+                    source_type=edge.source_type,
+                    source_id=edge.source_id,
+                    agent_id=new_node.agent_id,
+                    weight=edge.weight,
+                    valid_from_ts=now,
+                    valid_until_ts=None,
+                    inner_life_event_id=inner_life_event_id or edge.inner_life_event_id,
+                    trigger_type=edge.trigger_type,
+                )
+            )
+        for sid in source_ids:
+            self._edges.append(
+                EvidenceEdge(
+                    edge_id=new_id(),
+                    node_id=new_node_id,
+                    source_type=source_type,
+                    source_id=sid,
+                    agent_id=new_node.agent_id,
+                    weight=1.0,
+                    valid_from_ts=now,
+                    valid_until_ts=None,
+                    inner_life_event_id=inner_life_event_id,
+                    trigger_type=trigger_type,
+                )
+            )
+
+        self._emit(
+            "node_superseded",
+            old.node_id,
+            ts=now,
+            parent_node_id=old.parent_node_id,
+            source_id=None,
+            provenance_ref=inner_life_event_id,
+            node_type=old.node_type,
+            old_node_id=old.node_id,
+            new_node_id=new_node_id,
+            lineage_path=new_node.lineage_path,
+            contradiction_evidence_ids=[
+                r.source_id for r in current.contradiction_pressure
+            ],
+            reason="contradiction_threshold_met",
+        )
+
+        self.check_invariants()  # SE-3：变更后锁两图职责
+        return new_node
+
+    def _lifecycle_anchor(self, node: ElevationNode, now_ts: str) -> Optional[str]:
+        """decay 锚点（§8，复用 M5.13 ``_decay_locked`` 语义；old ≠ outdated）。
+
+        优先级：
+        1. 仍有效支持证据的最大 ``valid_from_ts``（最后一次被支持才算「活着」）；
+        2. 无仍有效证据：``last_support_ts`` 字段；
+        3. 无支持证据历史：``created_ts`` + grace 兜底（grace 期内返回负天数锚点，
+           不衰减）；
+        4. 缺锚点 / 坏 timestamp：返回 None（跳过，legacy，no crash，deterministic）。
+        """
+        active = [
+            e
+            for e in self._edges
+            if e.node_id == node.node_id and e.valid_until_ts is None
+        ]
+        if active:
+            parsed = [
+                (e.valid_from_ts, _parse_ts(e.valid_from_ts)) for e in active
+            ]
+            parsed = [(t, dt) for t, dt in parsed if dt is not None]
+            if parsed:
+                return max(parsed, key=lambda x: x[1])[0]
+        if node.last_support_ts is not None:
+            if _parse_ts(node.last_support_ts) is not None:
+                return node.last_support_ts
+            return None  # 坏 timestamp → 跳过
+        created = _parse_ts(node.created_ts)
+        if created is None:
+            return None
+        return (created + timedelta(days=LIFECYCLE_GRACE_DAYS)).isoformat()
+
+    def evaluate_lifecycle(self, now_ts: Optional[str] = None) -> List[ElevationNode]:
+        """周期评估（clock 驱动，挂 engine 既有 heartbeat/周期路径）：按锚点判定
+        WEAKENING / DORMANT 转移（§8）。
+
+        - **essence 豁免自动衰减**（T = ∞，§6/§7.2）：essence 永不因失去支持而
+          WEAKENING / DORMANT。
+        - **SUPERSEDED 是终态**：跳过（不自动复活，v1）。
+        - **逐级转移**：ACTIVE →(无新支持 ≥ T_weaken)→ WEAKENING →(无新支持 ≥
+          T_dormant)→ DORMANT；一次评估最多转移一级。
+        - 状态改变写 trace ``node_state_changed``（快照 before/after/anchor/reason）。
+        - **Forgetting = lifecycle transition**：转移只改 ``lifecycle_state``，
+          节点本体、证据链、lineage 永不物理删除。
+        """
+        now = now_ts or _utcnow_iso()
+        changed: List[ElevationNode] = []
+        for node in list(self._nodes.values()):
+            if node.node_type == "essence":
+                continue  # 豁免自动衰减
+            if node.lifecycle_state == "superseded":
+                continue  # 终态
+            anchor = self._lifecycle_anchor(node, now)
+            if anchor is None:
+                continue  # 缺锚点 / 坏 ts → 跳过
+            days = _days_between(anchor, now)
+            if days is None:
+                continue
+            if node.lifecycle_state == "active" and days >= LIFECYCLE_T_WEAKEN_DAYS:
+                new_state: LifecycleState = "weakening"
+            elif (
+                node.lifecycle_state == "weakening"
+                and days >= LIFECYCLE_T_DORMANT_DAYS
+            ):
+                new_state = "dormant"
+            else:
+                continue  # 默认「证据不足什么都不做」
+            updated = replace(node, lifecycle_state=new_state)
+            self._nodes[node.node_id] = updated
+            self._emit(
+                "node_state_changed",
+                updated.node_id,
+                ts=now,
+                parent_node_id=None,
+                source_id=None,
+                provenance_ref=None,
+                node_type=updated.node_type,
+                lifecycle_state_before=node.lifecycle_state,
+                lifecycle_state_after=new_state,
+                anchor_ts=anchor,
+                reason="no_new_support_evidence",
+            )
+            changed.append(updated)
+        return changed

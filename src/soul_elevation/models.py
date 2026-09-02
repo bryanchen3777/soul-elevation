@@ -33,6 +33,9 @@ Valence = Literal["positive", "negative", "neutral"]
 # WorldEvent（news/weather/calendar）直接映射成 ElevationInput，不经 InnerLifeEvent。
 # 既有 3 值（v1_memory / sage_fact / inner_life_event）语义 0 变更。
 SourceType = Literal["v1_memory", "sage_fact", "inner_life_event", "world_event"]
+# SE-5 Lifecycle：durable soul structure 四态（状态机，不是动作）。
+# ACTIVE → WEAKENING → DORMANT → SUPERSEDED；显式持久状态字段，additive schema。
+LifecycleState = Literal["active", "weakening", "dormant", "superseded"]
 
 VALID_NODE_TYPES: frozenset = frozenset(
     {"belief", "value", "trait", "essence", "pattern"}
@@ -42,6 +45,9 @@ SOUL_NODE_TYPES: frozenset = frozenset({"belief", "value", "trait", "essence"})
 VALID_VALENCES: frozenset = frozenset({"positive", "negative", "neutral"})
 VALID_SOURCE_TYPES: frozenset = frozenset(
     {"v1_memory", "sage_fact", "inner_life_event", "world_event"}
+)
+VALID_LIFECYCLE_STATES: frozenset = frozenset(
+    {"active", "weakening", "dormant", "superseded"}
 )
 
 
@@ -70,6 +76,22 @@ def evidence_key(source_id: str, event_identity: Optional[str]) -> tuple:
 def _ensure_unit_interval(name: str, value: float) -> None:
     if not isinstance(value, (int, float)) or not (0.0 <= float(value) <= 1.0):
         raise ValueError(f"{name} must be in [0.0, 1.0], got {value!r}")
+
+
+@dataclass(frozen=True)
+class ContradictionRecord:
+    """矛盾证据压力记录（SE-5，Contradiction ≠ Revision）。
+
+    只留**来源引用 + 时间**（source_id / ts / event_identity / provenance_ref），
+    **不复制证据正文**——原文永远留在上游 Memory / Fact / Event 里可回查。
+    写入 ``ElevationNode.contradiction_pressure`` 累积器；累积本身**不改变任何
+    状态**（压力 ≠ 改变），达 SUPERSEDE 阈值才触发转换。
+    """
+
+    source_id: str                    # 回指上游 memory_id / fact_id / event_id
+    ts: str                           # 矛盾证据出现时刻（ISO 8601 UTC）
+    event_identity: Optional[str] = None  # SE-1 event identity（独立性判定）
+    provenance_ref: Optional[str] = None  # 触发事件 id（join 回 trace）
 
 
 @dataclass(frozen=True)
@@ -102,6 +124,12 @@ class ElevationNode:
     provenance_ref: Optional[str]     # 触发本节点的上游事件 id（join 回 trace）
     # —— Consolidation ≠ Elevation：LLM 后验候选解释（仅 pattern 节点使用）——
     candidate_node_type: Optional[NodeType] = None  # 候选灵魂维度（interpretation，非 truth）
+    # —— SE-5 Lifecycle（additive 扩展，既有字段语义 0 变更）——
+    lifecycle_state: LifecycleState = "active"  # 四态之一，默认 active（创建即 ACTIVE）
+    last_support_ts: Optional[str] = None       # 最后一条仍有效支持证据的 ts（decay 锚点，§8）
+    contradiction_pressure: tuple = ()          # 矛盾证据压力累积器（ContradictionRecord 元组）
+    superseded_by: Optional[str] = None        # 反向 lineage：本节点被哪个新节点取代（仅 SUPERSEDED）
+    reconsideration_candidate: bool = False    # 仅 essence 使用：新证据长期累积但未达转换门槛
 
     def __post_init__(self) -> None:
         if self.node_type not in VALID_NODE_TYPES:
@@ -116,6 +144,11 @@ class ElevationNode:
         if self.valence not in VALID_VALENCES:
             raise ValueError(
                 f"invalid valence {self.valence!r}; expected one of {sorted(VALID_VALENCES)}"
+            )
+        if self.lifecycle_state not in VALID_LIFECYCLE_STATES:
+            raise ValueError(
+                f"invalid lifecycle_state {self.lifecycle_state!r}; "
+                f"expected one of {sorted(VALID_LIFECYCLE_STATES)}"
             )
         _ensure_unit_interval("confidence", self.confidence)
         _ensure_unit_interval("stability", self.stability)

@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Mapping, Optional, Union
 DEFAULT_TRACE_PATH = "data/elevation/elevation_trace.jsonl"
 
 # 事件类型词汇表（frozen，作为运行时校验依据）。
+# SE-5 additive 扩展：新增 3 个 lifecycle 事件（node_state_changed /
+# node_superseded / essence_reconsideration_candidate），既有 5 事件语义 0 变更。
 EVENT_TYPES: frozenset = frozenset(
     {
         "node_created",
@@ -30,6 +32,9 @@ EVENT_TYPES: frozenset = frozenset(
         "node_revised",
         "edge_decayed",
         "node_forgotten",
+        "node_state_changed",  # SE-5：状态转移（active→weakening / …→active）
+        "node_superseded",  # SE-5：SUPERSEDE 完成（旧节点冻结 + 新节点诞生）
+        "essence_reconsideration_candidate",  # SE-5：essence 被打上 reconsideration 标记
     }
 )
 
